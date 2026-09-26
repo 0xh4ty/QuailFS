@@ -6,11 +6,10 @@ type Head struct {
 }
 
 type HeadBody struct {
-	Schema           uint64
-	UserID           []byte
-	DatasetID        []byte
-	Generation       uint64
-	ManifestID       []byte
-	CatalogPeerHints [][]byte
-	CreatedAt        string
+	Schema     uint64
+	UserID     []byte
+	DatasetID  []byte
+	Generation uint64
+	ManifestID []byte
+	CreatedAt  string
 }

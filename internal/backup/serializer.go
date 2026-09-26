@@ -224,15 +224,14 @@ func SerializeHeadBody(head types.Head) []byte {
 
 	buf.Write(head.Body.ManifestID)
 
-	catalogPeerHintsCount := uint64(len(head.Body.CatalogPeerHints))
-	catalogPeerHintsCountBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(catalogPeerHintsCountBytes, catalogPeerHintsCount)
-	buf.Write(catalogPeerHintsCountBytes)
+	createdAtBytes := []byte(head.Body.CreatedAt)
 
-	serializedCatalogPeerHints := SerializeCatalogPeerHints(head.Body.CatalogPeerHints)
-	buf.Write(serializedCatalogPeerHints)
+	createdAtLengthBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(createdAtLengthBytes, uint64(len(createdAtBytes)))
+	buf.Write(createdAtLengthBytes)
 
-	buf.Write([]byte(head.Body.CreatedAt))
+	buf.Write(createdAtBytes)
+
 	serializedHeadBody = buf.Bytes()
 
 	return serializedHeadBody
@@ -623,7 +622,7 @@ func deserializeHeadWithLength(data []byte) (types.Head, int, error) {
 	var head types.Head
 	position := 0
 
-	if len(data) < 8 {
+	if len(data) < position+8 {
 		return types.Head{}, 0, fmt.Errorf("invalid head: missing schema")
 	}
 
@@ -659,31 +658,22 @@ func deserializeHeadWithLength(data []byte) (types.Head, int, error) {
 	position += 32
 
 	if len(data) < position+8 {
-		return types.Head{}, 0, fmt.Errorf("invalid head: missing peer hint count")
+		return types.Head{}, 0, fmt.Errorf("invalid head: missing created at length")
 	}
 
-	hintCount := binary.BigEndian.Uint64(data[position : position+8])
+	createdAtLength := binary.BigEndian.Uint64(data[position : position+8])
 	position += 8
 
-	const catalogPeerHintSize = 32
-
-	for range hintCount {
-		if len(data) < position+catalogPeerHintSize {
-			return types.Head{}, 0, fmt.Errorf("invalid head: truncated catalog peer hint")
-		}
-
-		head.Body.CatalogPeerHints = append(head.Body.CatalogPeerHints, data[position:position+catalogPeerHintSize])
-		position += catalogPeerHintSize
+	if createdAtLength > uint64(len(data)-position) {
+		return types.Head{}, 0, fmt.Errorf("invalid head: truncated created at")
 	}
 
-	const timestampLen = len("2006-01-02T15:04:05Z07:00")
+	head.Body.CreatedAt = string(data[position : position+int(createdAtLength)])
+	position += int(createdAtLength)
 
-	if len(data) < position+timestampLen+64 {
-		return types.Head{}, 0, fmt.Errorf("invalid head: missing timestamp or signature")
+	if len(data) < position+64 {
+		return types.Head{}, 0, fmt.Errorf("invalid head: missing signature")
 	}
-
-	head.Body.CreatedAt = string(data[position : position+timestampLen])
-	position += timestampLen
 
 	head.Sig.Signature = data[position : position+64]
 	position += 64

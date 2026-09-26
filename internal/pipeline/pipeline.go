@@ -271,7 +271,6 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 		datasetID,
 		generation,
 		manifest.ManifestID,
-		nil,
 		ed25519PrivateKey,
 	)
 

@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func CreateHead(schema uint64, userID []byte, datasetID []byte, generation uint64, manifestID []byte, catalogPeerHints [][]byte, ed25519privateKey []byte) types.Head {
+func CreateHead(schema uint64, userID []byte, datasetID []byte, generation uint64, manifestID []byte, ed25519privateKey []byte) types.Head {
 	var head types.Head
 
 	head.Body.Schema = schema
@@ -16,7 +16,6 @@ func CreateHead(schema uint64, userID []byte, datasetID []byte, generation uint6
 	head.Body.DatasetID = datasetID
 	head.Body.Generation = generation
 	head.Body.ManifestID = manifestID
-	head.Body.CatalogPeerHints = catalogPeerHints
 
 	createdAt := time.Now().UTC().Format(time.RFC3339)
 	head.Body.CreatedAt = createdAt
