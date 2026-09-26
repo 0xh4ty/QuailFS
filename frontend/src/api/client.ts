@@ -9,6 +9,7 @@ import type {
 import {
   GenerateRecoveryPhrase,
   Unlock,
+  ConfigureBootstrapNodes,
   CreateDataset,
   ListDirectory,
   GetHomeDirectory,
@@ -17,6 +18,12 @@ import {
 
 export async function unlock(recoveryPhrase: string): Promise<boolean> {
   return Unlock(recoveryPhrase);
+}
+
+export async function configureBootstrapNodes(
+  addresses: string[],
+): Promise<void> {
+  await ConfigureBootstrapNodes(addresses);
 }
 
 export async function getUserInfo(): Promise<UserInfo> {

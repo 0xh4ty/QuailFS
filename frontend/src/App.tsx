@@ -3,13 +3,14 @@ import type { Dataset, FileEntry, Node, View } from "./api/types";
 import {
   generateRecoveryPhrase,
   unlock,
+  configureBootstrapNodes,
   createDataset,
   listDirectory,
   getHomeDirectory,
   backup,
 } from "./api/client";
 
-type AppStage = "splash" | "unlock" | "app";
+type AppStage = "splash" | "unlock" | "network-setup" | "app";
 
 type BrowseMode = "local" | "network";
 
@@ -72,6 +73,8 @@ function App() {
   const [stage, setStage] = useState<AppStage>("splash");
   const [nextStage, setNextStage] = useState<"unlock" | "app">("unlock");
   const [splashLeaving, setSplashLeaving] = useState(false);
+
+  const [bootstrapNodes, setBootstrapNodes] = useState<string[]>([]);
 
   const [view, setView] = useState<View>("dashboard");
   const [datasets, setDatasets] = useState<Dataset[]>([]);
@@ -142,8 +145,17 @@ function App() {
     if (success) {
       const home = await getHomeDirectory();
       setHomeDirectory(home);
-      setStage("app");
+      setStage("network-setup");
     }
+  };
+
+  const handleConfigureBootstrapNodes = async (
+    addresses: string[],
+  ): Promise<void> => {
+    await configureBootstrapNodes(addresses);
+
+    setBootstrapNodes(addresses);
+    setStage("app");
   };
 
   const handleSelectDataset = (datasetId: string) => {
@@ -298,6 +310,14 @@ function App() {
     return (
       <div className="startup-stage startup-stage--revealed">
         <UnlockView onUnlock={handleUnlock} />
+      </div>
+    );
+  }
+
+  if (stage === "network-setup") {
+    return (
+      <div className="startup-stage startup-stage--revealed">
+        <NetworkSetupView onContinue={handleConfigureBootstrapNodes} />
       </div>
     );
   }
@@ -509,6 +529,128 @@ function UnlockView({ onUnlock }: { onUnlock: (phrase: string) => void }) {
             </section>
           </div>
         </div>
+      </div>
+    </main>
+  );
+}
+
+function NetworkSetupView({
+  onContinue,
+}: {
+  onContinue: (addresses: string[]) => Promise<void>;
+}) {
+  const [addresses, setAddresses] = useState<string[]>([""]);
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState("");
+
+  const updateAddress = (index: number, value: string) => {
+    setAddresses((previous) =>
+      previous.map((address, currentIndex) =>
+        currentIndex === index ? value : address,
+      ),
+    );
+  };
+
+  const addAddress = () => {
+    setAddresses((previous) => [...previous, ""]);
+  };
+
+  const removeAddress = (index: number) => {
+    setAddresses((previous) =>
+      previous.length === 1
+        ? [""]
+        : previous.filter((_, currentIndex) => currentIndex !== index),
+    );
+  };
+
+  const handleContinue = async () => {
+    const cleanedAddresses = addresses
+      .map((address) => address.trim())
+      .filter((address) => address.length > 0);
+
+    if (cleanedAddresses.length === 0) {
+      setError("Add at least one bootstrap node.");
+      return;
+    }
+
+    setError("");
+    setConnecting(true);
+
+    try {
+      await onContinue(cleanedAddresses);
+    } catch (error) {
+      console.error("Failed to configure bootstrap nodes:", error);
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Failed to connect to bootstrap nodes.",
+      );
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  return (
+    <main className="network-setup-view">
+      <div className="network-setup-card">
+        <div className="unlock-logo" aria-hidden="true">
+          <QuailLogo />
+        </div>
+
+        <div className="network-setup-heading">
+          <h1>Connect to the QuailFS network</h1>
+
+          <p>
+            Add one or more bootstrap nodes so QuailFS can discover the network
+            and retrieve your catalog.
+          </p>
+        </div>
+
+        <div className="bootstrap-node-list">
+          {addresses.map((address, index) => (
+            <div className="bootstrap-node-row" key={index}>
+              <input
+                className="text-input"
+                type="text"
+                value={address}
+                onChange={(event) => updateAddress(index, event.target.value)}
+                placeholder="/ip4/203.0.113.10/tcp/4001/p2p/12D3KooW..."
+                spellCheck={false}
+                autoComplete="off"
+              />
+
+              <button
+                className="icon-button"
+                type="button"
+                onClick={() => removeAddress(index)}
+                aria-label="Remove bootstrap node"
+                disabled={addresses.length === 1}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <button
+          className="text-button"
+          type="button"
+          onClick={addAddress}
+          disabled={connecting}
+        >
+          + Add bootstrap node
+        </button>
+
+        {error && <p className="network-setup-error">{error}</p>}
+
+        <button
+          className="primary-button unlock-button"
+          type="button"
+          onClick={() => void handleContinue()}
+          disabled={connecting}
+        >
+          {connecting ? "Connecting..." : "Continue"}
+        </button>
       </div>
     </main>
   );

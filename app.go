@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"github.com/0xh4ty/quailfs/internal/keys"
 	"github.com/0xh4ty/quailfs/internal/pipeline"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multiaddr"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +31,8 @@ type App struct {
 	libp2pPrivateKey  crypto.PrivKey
 
 	datasets map[string]DatasetSession
+
+	bootstrapPeers []peer.AddrInfo
 }
 
 type UserInfo struct {
@@ -137,6 +141,32 @@ func (a *App) GetUserInfo() (UserInfo, error) {
 		UserID:    hex.EncodeToString(a.userID),
 		PublicKey: hex.EncodeToString(a.ed25519PublicKey),
 	}, nil
+}
+
+func (a *App) ConfigureBootstrapNodes(addresses []string) error {
+	if len(addresses) == 0 {
+		return fmt.Errorf("no bootstrap nodes provided")
+	}
+
+	peerInfos := make([]peer.AddrInfo, 0, len(addresses))
+
+	for _, address := range addresses {
+		maddr, err := multiaddr.NewMultiaddr(address)
+		if err != nil {
+			return fmt.Errorf("invalid bootstrap multiaddr %q: %w", address, err)
+		}
+
+		peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+		if err != nil {
+			return fmt.Errorf("invalid bootstrap peer %q: %w", address, err)
+		}
+
+		peerInfos = append(peerInfos, *peerInfo)
+	}
+
+	a.bootstrapPeers = peerInfos
+
+	return nil
 }
 
 func (a *App) CreateDataset(label string) (DatasetInfo, error) {
@@ -260,6 +290,6 @@ func (a *App) Backup(datasetID string, paths []string) error {
 		a.ed25519PrivateKey,
 		a.ed25519PublicKey,
 		a.libp2pPrivateKey,
-		[]peer.AddrInfo{},
+		a.bootstrapPeers,
 	)
 }

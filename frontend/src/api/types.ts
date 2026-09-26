@@ -23,6 +23,10 @@ export type Node = {
   bootstrap: boolean;
 };
 
+export type BootstrapNode = {
+  address: string;
+};
+
 export type UserInfo = {
   userId: string;
   publicKey: string;
