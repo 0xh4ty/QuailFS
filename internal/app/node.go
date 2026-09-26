@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -12,7 +11,6 @@ import (
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
-	net "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
 	"log"
@@ -145,10 +143,7 @@ func RunNode(enableRelay bool) {
 		log.Println("  -", p)
 	}
 
-	node.SetStreamHandler(
-		"/quailfs/1.0.0",
-		handleStream,
-	)
+	network.RegisterHandlers(node, db)
 
 	if enableRelay {
 		log.Println("Relay service enabled")
@@ -297,18 +292,6 @@ func startPeerWithBootstrapNodes(
 	}
 
 	return kad, nil
-}
-
-func handleStream(s net.Stream) {
-	defer s.Close()
-
-	log.Println("Got a new stream!")
-
-	reader := bufio.NewReader(s)
-	writer := bufio.NewWriter(s)
-
-	_ = reader
-	_ = writer
 }
 
 func verifyDHTDiscovery(
