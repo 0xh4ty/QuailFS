@@ -10,6 +10,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"go.etcd.io/bbolt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,33 +97,48 @@ func handlePutCatalog(stream network.Stream, db *bbolt.DB) {
 	reader := bufio.NewReader(stream)
 	writer := bufio.NewWriter(stream)
 
+	log.Printf("PUT_CATALOG: incoming stream from %s", stream.Conn().RemotePeer())
+
 	objectName, err := readString(reader)
 	if err != nil {
+		log.Printf("PUT_CATALOG: failed to read object name: %v", err)
 		writeResponse(writer, false)
 		return
 	}
 
+	log.Printf("PUT_CATALOG: object name: %s", objectName)
+
 	objectType, err := reader.ReadByte()
 	if err != nil {
+		log.Printf("PUT_CATALOG: failed to read object type: %v", err)
 		writeResponse(writer, false)
 		return
 	}
+
+	log.Printf("PUT_CATALOG: object type: %d", objectType)
 
 	ed25519PublicKey := make([]byte, 32)
 
 	if _, err := io.ReadFull(reader, ed25519PublicKey); err != nil {
+		log.Printf("PUT_CATALOG: failed to read public key: %v", err)
 		writeResponse(writer, false)
 		return
 	}
+
+	log.Printf("PUT_CATALOG: received Ed25519 public key")
 
 	var catalogSize uint64
 
 	if err := binary.Read(reader, binary.BigEndian, &catalogSize); err != nil {
+		log.Printf("PUT_CATALOG: failed to read catalog size: %v", err)
 		writeResponse(writer, false)
 		return
 	}
 
+	log.Printf("PUT_CATALOG: catalog size: %d bytes", catalogSize)
+
 	if catalogSize > uint64(^uint(0)>>1) {
+		log.Printf("PUT_CATALOG: catalog too large: %d bytes", catalogSize)
 		writeResponse(writer, false)
 		return
 	}
@@ -130,26 +146,43 @@ func handlePutCatalog(stream network.Stream, db *bbolt.DB) {
 	catalog := make([]byte, int(catalogSize))
 
 	if _, err := io.ReadFull(reader, catalog); err != nil {
+		log.Printf("PUT_CATALOG: failed to read catalog data: %v", err)
 		writeResponse(writer, false)
 		return
 	}
+
+	log.Printf("PUT_CATALOG: catalog data received")
 
 	if err := validateCatalogObjectName(objectName); err != nil {
+		log.Printf("PUT_CATALOG: invalid object name %q: %v", objectName, err)
 		writeResponse(writer, false)
 		return
 	}
+
+	log.Printf("PUT_CATALOG: object name validated")
 
 	if err := cat.VerifyCatalogObject(objectType, catalog, ed25519PublicKey); err != nil {
+		log.Printf("PUT_CATALOG: catalog verification failed: %v", err)
 		writeResponse(writer, false)
 		return
 	}
+
+	log.Printf("PUT_CATALOG: catalog verification successful")
 
 	if err := storage.Put(db, "catalogs", []byte(objectName), catalog); err != nil {
+		log.Printf("PUT_CATALOG: failed to store catalog %q: %v", objectName, err)
 		writeResponse(writer, false)
 		return
 	}
 
-	writeResponse(writer, true)
+	log.Printf("PUT_CATALOG: catalog %q stored successfully", objectName)
+
+	if err := writeResponse(writer, true); err != nil {
+		log.Printf("PUT_CATALOG: failed to send success response: %v", err)
+		return
+	}
+
+	log.Printf("PUT_CATALOG: completed successfully for %q", objectName)
 }
 
 func validShardName(name string) bool {
