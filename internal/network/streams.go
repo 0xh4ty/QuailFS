@@ -80,7 +80,7 @@ func readResponse(reader *bufio.Reader) (bool, error) {
 	}
 }
 
-func PutCatalog(ctx context.Context, h host.Host, peerID peer.ID, objectName string, objectType uint8, catalog []byte) error {
+func PutCatalog(ctx context.Context, h host.Host, peerID peer.ID, objectName string, objectType uint8, catalog []byte, ed25519PublicKey []byte) error {
 	stream, err := h.NewStream(ctx, peerID, PutCatalogProtocol)
 	if err != nil {
 		return fmt.Errorf("open PUT_CATALOG stream: %w", err)
@@ -96,6 +96,14 @@ func PutCatalog(ctx context.Context, h host.Host, peerID peer.ID, objectName str
 
 	if err := writer.WriteByte(objectType); err != nil {
 		return fmt.Errorf("write catalog object type: %w", err)
+	}
+
+	if len(ed25519PublicKey) != 32 {
+		return fmt.Errorf("invalid Ed25519 public key length: %d", len(ed25519PublicKey))
+	}
+
+	if _, err := writer.Write(ed25519PublicKey); err != nil {
+		return fmt.Errorf("write Ed25519 public key: %w", err)
 	}
 
 	if err := binary.Write(writer, binary.BigEndian, uint64(len(catalog))); err != nil {

@@ -258,6 +258,7 @@ func (a *App) Backup(datasetID string, paths []string) error {
 		nil,
 		a.x25519PublicKey,
 		a.ed25519PrivateKey,
+		a.ed25519PublicKey,
 		a.libp2pPrivateKey,
 		[]peer.AddrInfo{},
 	)

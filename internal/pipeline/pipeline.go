@@ -150,7 +150,7 @@ func randomCatalogSuffix() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte, datasetKey []byte, catalogKey []byte, label string, generation uint64, parentManifestID []byte, userX25519Pubkey []byte, ed25519PrivateKey []byte, libp2pPrivateKey crypto.PrivKey, peerInfos []peer.AddrInfo) error {
+func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte, datasetKey []byte, catalogKey []byte, label string, generation uint64, parentManifestID []byte, userX25519Pubkey []byte, ed25519PrivateKey []byte, ed25519PublicKey []byte, libp2pPrivateKey crypto.PrivKey, peerInfos []peer.AddrInfo) error {
 	var stripeIDs [][]byte
 	var shardCollection [][][]byte
 
@@ -390,7 +390,7 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 				return fmt.Errorf("catalog object %q not found", objectName)
 			}
 
-			if err := network.PutCatalog(ctx, h, peerID, object.name, object.objectType, object.data); err != nil {
+			if err := network.PutCatalog(ctx, h, peerID, object.name, object.objectType, object.data, ed25519PublicKey); err != nil {
 				return fmt.Errorf("put catalog %q to peer %s: %w", object.name, peerID, err)
 			}
 		}
