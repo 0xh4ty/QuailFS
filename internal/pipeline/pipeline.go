@@ -13,7 +13,7 @@ import (
 	"github.com/0xh4ty/quailfs/internal/network"
 	"github.com/0xh4ty/quailfs/internal/place"
 	"github.com/0xh4ty/quailfs/pkg/types"
-	"github.com/libp2p/go-libp2p/core/crypto"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"os"
 	"path/filepath"
@@ -150,7 +150,7 @@ func randomCatalogSuffix() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte, datasetKey []byte, catalogKey []byte, label string, generation uint64, parentManifestID []byte, userX25519Pubkey []byte, ed25519PrivateKey []byte, ed25519PublicKey []byte, libp2pPrivateKey crypto.PrivKey, peerInfos []peer.AddrInfo) error {
+func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte, datasetKey []byte, catalogKey []byte, label string, generation uint64, parentManifestID []byte, userX25519Pubkey []byte, ed25519PrivateKey []byte, ed25519PublicKey []byte, kad *dht.IpfsDHT) error {
 	var stripeIDs [][]byte
 	var shardCollection [][][]byte
 
@@ -262,20 +262,24 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 		ed25519PrivateKey,
 	)
 
-	h, err := network.NewHost(libp2pPrivateKey, false, nil)
-	if err != nil {
-		return fmt.Errorf("create libp2p host: %w", err)
+	if kad == nil {
+		return fmt.Errorf("DHT is not initialized")
 	}
-	defer h.Close()
 
-	livePeers := make([]peer.ID, 0, len(peerInfos))
+	h := kad.Host()
 
-	for _, addrInfo := range peerInfos {
-		if err := h.Connect(ctx, addrInfo); err != nil {
-			return fmt.Errorf("connect to peer %s: %w", addrInfo.ID, err)
+	livePeers := make([]peer.ID, 0)
+
+	for _, p := range kad.RoutingTable().ListPeers() {
+		if p == h.ID() {
+			continue
 		}
 
-		livePeers = append(livePeers, addrInfo.ID)
+		livePeers = append(livePeers, p)
+	}
+
+	if len(livePeers) == 0 {
+		return fmt.Errorf("no peers discovered through DHT")
 	}
 
 	var objectNames []string

@@ -6,14 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"github.com/0xh4ty/quailfs/internal/keys"
+	"github.com/0xh4ty/quailfs/internal/network"
 	"github.com/0xh4ty/quailfs/internal/pipeline"
+	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 type App struct {
@@ -33,6 +37,8 @@ type App struct {
 	datasets map[string]DatasetSession
 
 	bootstrapPeers []peer.AddrInfo
+	libp2pHost     host.Host
+	kad            *dht.IpfsDHT
 }
 
 type UserInfo struct {
@@ -148,23 +154,95 @@ func (a *App) ConfigureBootstrapNodes(addresses []string) error {
 		return fmt.Errorf("no bootstrap nodes provided")
 	}
 
-	peerInfos := make([]peer.AddrInfo, 0, len(addresses))
+	h, err := network.NewHost(
+		a.libp2pPrivateKey,
+		false,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("create libp2p host: %w", err)
+	}
+
+	kad, err := dht.New(
+		h,
+		dht.Mode(dht.ModeServer),
+	)
+	if err != nil {
+		h.Close()
+		return fmt.Errorf("create DHT: %w", err)
+	}
+
+	var lastErr error
+	connectedAny := false
 
 	for _, address := range addresses {
 		maddr, err := multiaddr.NewMultiaddr(address)
 		if err != nil {
-			return fmt.Errorf("invalid bootstrap multiaddr %q: %w", address, err)
+			lastErr = fmt.Errorf(
+				"invalid bootstrap multiaddress %q: %w",
+				address,
+				err,
+			)
+			continue
 		}
 
-		peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+		addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
 		if err != nil {
-			return fmt.Errorf("invalid bootstrap peer %q: %w", address, err)
+			lastErr = fmt.Errorf(
+				"invalid bootstrap peer address %q: %w",
+				address,
+				err,
+			)
+			continue
 		}
 
-		peerInfos = append(peerInfos, *peerInfo)
+		connectCtx, cancel := context.WithTimeout(
+			a.ctx,
+			10*time.Second,
+		)
+
+		err = h.Connect(connectCtx, *addrInfo)
+
+		cancel()
+
+		if err != nil {
+			lastErr = fmt.Errorf(
+				"failed to connect to bootstrap node %q: %w",
+				address,
+				err,
+			)
+			continue
+		}
+
+		kad.RoutingTable().TryAddPeer(
+			addrInfo.ID,
+			true,
+			false,
+		)
+
+		connectedAny = true
 	}
 
-	a.bootstrapPeers = peerInfos
+	if !connectedAny {
+		kad.Close()
+		h.Close()
+
+		if lastErr == nil {
+			lastErr = fmt.Errorf("no valid bootstrap nodes")
+		}
+
+		return lastErr
+	}
+
+	if err := kad.Bootstrap(a.ctx); err != nil {
+		kad.Close()
+		h.Close()
+
+		return fmt.Errorf("bootstrap DHT: %w", err)
+	}
+
+	a.libp2pHost = h
+	a.kad = kad
 
 	return nil
 }
@@ -289,7 +367,6 @@ func (a *App) Backup(datasetID string, paths []string) error {
 		a.x25519PublicKey,
 		a.ed25519PrivateKey,
 		a.ed25519PublicKey,
-		a.libp2pPrivateKey,
-		a.bootstrapPeers,
+		a.kad,
 	)
 }
