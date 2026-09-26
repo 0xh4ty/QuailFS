@@ -15,6 +15,7 @@ import (
 	"github.com/0xh4ty/quailfs/pkg/types"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -151,6 +152,9 @@ func randomCatalogSuffix() (string, error) {
 }
 
 func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte, datasetKey []byte, catalogKey []byte, label string, generation uint64, parentManifestID []byte, userX25519Pubkey []byte, ed25519PrivateKey []byte, ed25519PublicKey []byte, kad *dht.IpfsDHT) error {
+	log.Printf("Backup started")
+	log.Printf("Backup: %d path(s)", len(paths))
+
 	var stripeIDs [][]byte
 	var shardCollection [][][]byte
 
@@ -159,8 +163,11 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 	var mStripes []types.MStripe
 
 	for _, rootPath := range paths {
+		log.Printf("Backup: processing path %q", rootPath)
+
 		info, err := os.Stat(rootPath)
 		if err != nil {
+			log.Printf("Backup: stat failed for %q: %v", rootPath, err)
 			return fmt.Errorf("stat %q: %w", rootPath, err)
 		}
 
@@ -169,8 +176,11 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 		}
 
 		if info.IsDir() {
+			log.Printf("Backup: walking directory %q", rootPath)
+
 			err = filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
 				if err != nil {
+					log.Printf("Backup: walk error at %q: %v", path, err)
 					return err
 				}
 
@@ -178,10 +188,15 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 					return nil
 				}
 
+				log.Printf("Backup: processing file %q", path)
+
 				file, chunks, stripes, shards, err := backupFile(path, datasetID, datasetKey)
 				if err != nil {
+					log.Printf("Backup: backupFile failed for %q: %v", path, err)
 					return err
 				}
+
+				log.Printf("Backup: file %q produced %d chunk(s), %d stripe(s), %d shard set(s)", path, len(chunks), len(stripes), len(shards.shards))
 
 				tree.Files = append(tree.Files, file)
 				mChunks = append(mChunks, chunks...)
@@ -192,13 +207,19 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 				return nil
 			})
 			if err != nil {
+				log.Printf("Backup: directory backup failed for %q: %v", rootPath, err)
 				return fmt.Errorf("backup directory %q: %w", rootPath, err)
 			}
 		} else {
+			log.Printf("Backup: processing file %q", rootPath)
+
 			file, chunks, stripes, shards, err := backupFile(rootPath, datasetID, datasetKey)
 			if err != nil {
+				log.Printf("Backup: backupFile failed for %q: %v", rootPath, err)
 				return err
 			}
+
+			log.Printf("Backup: file produced %d chunk(s), %d stripe(s), %d shard set(s)", len(chunks), len(stripes), len(shards.shards))
 
 			tree.Files = append(tree.Files, file)
 			mChunks = append(mChunks, chunks...)
@@ -209,6 +230,8 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 
 		trees = append(trees, tree)
 	}
+
+	log.Printf("Backup: local processing complete: %d chunk(s), %d stripe(s), %d shard set(s)", len(mChunks), len(mStripes), len(shardCollection))
 
 	manifest, err := catalog.CreateManifest(
 		datasetID,
@@ -222,8 +245,11 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 		ed25519PrivateKey,
 	)
 	if err != nil {
+		log.Printf("Backup: create manifest failed: %v", err)
 		return fmt.Errorf("create manifest: %w", err)
 	}
+
+	log.Printf("Backup: manifest created: %x", manifest.ManifestID)
 
 	wrappedDataset, err := catalog.CreateWrappedDataset(
 		userID,
@@ -235,6 +261,7 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 		ed25519PrivateKey,
 	)
 	if err != nil {
+		log.Printf("Backup: create wrapped dataset failed: %v", err)
 		return fmt.Errorf("create wrapped dataset: %w", err)
 	}
 
@@ -263,10 +290,13 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 	)
 
 	if kad == nil {
+		log.Printf("Backup: DHT is nil")
 		return fmt.Errorf("DHT is not initialized")
 	}
 
 	h := kad.Host()
+
+	log.Printf("Backup: local PeerID: %s", h.ID())
 
 	livePeers := make([]peer.ID, 0)
 
@@ -275,8 +305,11 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 			continue
 		}
 
+		log.Printf("Backup: discovered peer: %s", p)
 		livePeers = append(livePeers, p)
 	}
+
+	log.Printf("Backup: discovered %d peer(s)", len(livePeers))
 
 	if len(livePeers) == 0 {
 		return fmt.Errorf("no peers discovered through DHT")
@@ -290,9 +323,13 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 		}
 	}
 
+	log.Printf("Backup: %d shard object(s) to place", len(objectNames))
+
 	placements := place.Place(livePeers, objectNames)
 
 	for peerID, shardNames := range placements {
+		log.Printf("Backup: peer %s assigned %d shard(s)", peerID, len(shardNames))
+
 		for _, shardName := range shardNames {
 			var shard []byte
 
@@ -312,30 +349,41 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 			}
 
 			if shard == nil {
+				log.Printf("Backup: shard %q not found in shard collection", shardName)
 				return fmt.Errorf("shard %q not found", shardName)
 			}
 
+			log.Printf("Backup: sending shard %s to peer %s (%d bytes)", shardName, peerID, len(shard))
+
 			if err := network.PutShard(ctx, h, peerID, shardName, shard); err != nil {
+				log.Printf("Backup: PUT_SHARD failed for %s -> %s: %v", shardName, peerID, err)
 				return fmt.Errorf("put shard %q to peer %s: %w", shardName, peerID, err)
 			}
+
+			log.Printf("Backup: shard %s sent successfully to peer %s", shardName, peerID)
 		}
 	}
+
+	log.Printf("Backup: all shards uploaded successfully")
 
 	userIndexKey := deriveUserIndexKey(userID)
 	headKey := deriveHeadKey(userID, datasetID)
 
 	userIndexSuffix, err := randomCatalogSuffix()
 	if err != nil {
+		log.Printf("Backup: generate user index suffix failed: %v", err)
 		return fmt.Errorf("generate user index suffix: %w", err)
 	}
 
 	headSuffix, err := randomCatalogSuffix()
 	if err != nil {
+		log.Printf("Backup: generate head suffix failed: %v", err)
 		return fmt.Errorf("generate head suffix: %w", err)
 	}
 
 	manifestSuffix, err := randomCatalogSuffix()
 	if err != nil {
+		log.Printf("Backup: generate manifest suffix failed: %v", err)
 		return fmt.Errorf("generate manifest suffix: %w", err)
 	}
 
@@ -371,6 +419,8 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 		)
 	}
 
+	log.Printf("Backup: created %d catalog object replicas", len(catalogObjects))
+
 	catalogNames := make([]string, 0, len(catalogObjects))
 
 	for _, object := range catalogObjects {
@@ -380,6 +430,8 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 	catalogPlacements := place.Place(livePeers, catalogNames)
 
 	for peerID, objectNames := range catalogPlacements {
+		log.Printf("Backup: peer %s assigned %d catalog object(s)", peerID, len(objectNames))
+
 		for _, objectName := range objectNames {
 			var object *catalogObject
 
@@ -391,14 +443,22 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 			}
 
 			if object == nil {
+				log.Printf("Backup: catalog object %q not found", objectName)
 				return fmt.Errorf("catalog object %q not found", objectName)
 			}
 
+			log.Printf("Backup: sending catalog %s to peer %s", object.name, peerID)
+
 			if err := network.PutCatalog(ctx, h, peerID, object.name, object.objectType, object.data, ed25519PublicKey); err != nil {
+				log.Printf("Backup: PUT_CATALOG failed for %s -> %s: %v", object.name, peerID, err)
 				return fmt.Errorf("put catalog %q to peer %s: %w", object.name, peerID, err)
 			}
+
+			log.Printf("Backup: catalog %s sent successfully to peer %s", object.name, peerID)
 		}
 	}
+
+	log.Printf("Backup completed successfully")
 
 	return nil
 }
