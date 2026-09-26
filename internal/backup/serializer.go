@@ -186,7 +186,13 @@ func SerializeUserIndexBody(userIndex types.UserIndex) []byte {
 	serializedDatasetEntries := SerializeDatasetEntries(userIndex.Body.Datasets)
 	buf.Write(serializedDatasetEntries)
 
-	buf.Write([]byte(userIndex.Body.UpdatedAt))
+	updatedAtBytes := []byte(userIndex.Body.UpdatedAt)
+
+	updatedAtLengthBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(updatedAtLengthBytes, uint64(len(updatedAtBytes)))
+	buf.Write(updatedAtLengthBytes)
+
+	buf.Write(updatedAtBytes)
 
 	serializedUserIndexBody = buf.Bytes()
 
@@ -511,7 +517,7 @@ func DeserializeUserIndex(data []byte) (types.UserIndex, error) {
 		labelLen := binary.BigEndian.Uint64(data[position : position+8])
 		position += 8
 
-		if len(data) < position+int(labelLen) {
+		if labelLen > uint64(len(data)-position) {
 			return types.UserIndex{}, fmt.Errorf("invalid user index: truncated label")
 		}
 
@@ -532,16 +538,26 @@ func DeserializeUserIndex(data []byte) (types.UserIndex, error) {
 		})
 	}
 
-	const timestampLen = len("2006-01-02T15:04:05Z07:00")
-
-	if len(data) < position+timestampLen+64 {
-		return types.UserIndex{}, fmt.Errorf("invalid user index: missing timestamp or signature")
+	if len(data) < position+8 {
+		return types.UserIndex{}, fmt.Errorf("invalid user index: missing updated at length")
 	}
 
-	userIndex.Body.UpdatedAt = string(data[position : position+timestampLen])
-	position += timestampLen
+	updatedAtLength := binary.BigEndian.Uint64(data[position : position+8])
+	position += 8
+
+	if updatedAtLength > uint64(len(data)-position) {
+		return types.UserIndex{}, fmt.Errorf("invalid user index: truncated updated at")
+	}
+
+	userIndex.Body.UpdatedAt = string(data[position : position+int(updatedAtLength)])
+	position += int(updatedAtLength)
+
+	if len(data) < position+64 {
+		return types.UserIndex{}, fmt.Errorf("invalid user index: missing signature")
+	}
 
 	userIndex.Sig.Signature = data[position : position+64]
+	position += 64
 
 	return userIndex, nil
 }
