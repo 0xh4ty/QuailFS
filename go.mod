@@ -3,6 +3,7 @@ module github.com/0xh4ty/quailfs
 go 1.26.6
 
 require (
+	github.com/ipfs/go-cid v0.6.2
 	github.com/jotfs/fastcdc-go v0.2.0
 	github.com/klauspost/compress v1.20.0
 	github.com/klauspost/reedsolomon v1.14.2
@@ -38,7 +39,6 @@ require (
 	github.com/hashicorp/golang-lru v1.0.2 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/ipfs/boxo v0.41.0 // indirect
-	github.com/ipfs/go-cid v0.6.2 // indirect
 	github.com/ipfs/go-datastore v0.9.2 // indirect
 	github.com/ipfs/go-log/v2 v2.9.2 // indirect
 	github.com/ipld/go-ipld-prime v0.24.0 // indirect
