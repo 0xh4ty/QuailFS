@@ -87,6 +87,10 @@ type FileEntry struct {
 	Size int64  `json:"size,omitempty"`
 }
 
+type restoreFileEntry struct {
+	ChunkIDs [][]byte
+}
+
 func NewApp() *App {
 	return &App{
 		datasets: make(map[string]DatasetSession),
@@ -1205,5 +1209,162 @@ func (a *App) Backup(datasetID string, paths []string) error {
 }
 
 func (a *App) Restore(datasetID string, paths []string, destination string) (string, error) {
-	return "stub", nil
+	a.mu.RLock()
+	if !a.unlocked {
+		a.mu.RUnlock()
+		return "", errors.New("identity is locked")
+	}
+	dataset, ok := a.datasets[datasetID]
+	kad := a.kad
+	ctx := a.ctx
+	userID := append([]byte(nil), a.userID...)
+	pub := append([]byte(nil), a.ed25519PublicKey...)
+	a.mu.RUnlock()
+
+	if !ok {
+		return "", errors.New("dataset not found")
+	}
+	if kad == nil {
+		return "", errors.New("DHT is not initialized")
+	}
+	if len(paths) == 0 {
+		return "", errors.New("no paths selected for restore")
+	}
+
+	fileIndex, chunkIndex, stripeIndex, err := a.resolveDatasetForRestore(ctx, kad, userID, pub, dataset)
+	if err != nil {
+		return "", fmt.Errorf("resolve dataset: %w", err)
+	}
+
+	var toRestore []pipeline.FileToRestore
+	for _, p := range paths {
+		normalized := normalizeDatasetPath(p)
+		entry, ok := fileIndex[normalized]
+		if !ok {
+			return "", fmt.Errorf("path %q not found in dataset", p)
+		}
+		toRestore = append(toRestore, pipeline.FileToRestore{
+			Path:     normalized,
+			ChunkIDs: entry.ChunkIDs,
+		})
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	destDir := filepath.Join(homeDir, ".node-data", "restored")
+
+	written, err := pipeline.Restore(ctx, kad, dataset.DatasetID, dataset.DatasetKey, toRestore, chunkIndex, stripeIndex, destDir)
+	if err != nil {
+		return "", err
+	}
+
+	log.Printf("Restore: wrote %d file(s) to %s", len(written), destDir)
+
+	return destDir, nil
+}
+
+func (a *App) resolveDatasetForRestore(
+	ctx context.Context,
+	kad *dht.IpfsDHT,
+	userID []byte,
+	pub []byte,
+	dataset DatasetSession,
+) (map[string]restoreFileEntry, map[string]types.MChunk, map[string]types.MStripe, error) {
+	headKey := keys.DeriveHeadKey(userID, dataset.DatasetID)
+	headBlobs, err := network.FetchCatalogObjects(ctx, kad, headKey)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("fetch dataset head: %w", err)
+	}
+
+	seenManifest := make(map[string]struct{})
+	var manifestIDs [][]byte
+
+	for _, blob := range headBlobs {
+		if blob.Type != 2 {
+			continue
+		}
+		if err := catalog.VerifyCatalogObject(blob.Type, blob.Data, pub); err != nil {
+			continue
+		}
+
+		head, wrapped, err := backup.DeserializeHeadCatalog(blob.Data)
+		if err != nil {
+			continue
+		}
+		if !bytes.Equal(head.Body.UserID, userID) || !bytes.Equal(head.Body.DatasetID, dataset.DatasetID) {
+			continue
+		}
+		if !bytes.Equal(wrapped.Body.DatasetID, dataset.DatasetID) {
+			continue
+		}
+
+		key := hex.EncodeToString(head.Body.ManifestID)
+		if _, dup := seenManifest[key]; dup {
+			continue
+		}
+		seenManifest[key] = struct{}{}
+		manifestIDs = append(manifestIDs, append([]byte(nil), head.Body.ManifestID...))
+	}
+
+	if len(manifestIDs) == 0 {
+		return nil, nil, nil, errors.New("no valid head found for dataset")
+	}
+
+	fileIndex := make(map[string]restoreFileEntry)
+	chunkIndex := make(map[string]types.MChunk)
+	stripeIndex := make(map[string]types.MStripe)
+	resolvedAny := false
+
+	for _, manifestID := range manifestIDs {
+		chain, err := a.resolveManifestChain(ctx, kad, dataset, pub, manifestID)
+		if err != nil {
+			log.Printf("restore: dataset %x: skipping manifest %x: %v", dataset.DatasetID, manifestID, err)
+			continue
+		}
+		resolvedAny = true
+
+		for i := len(chain) - 1; i >= 0; i-- {
+			manifest := chain[i]
+
+			for _, chunk := range manifest.ManifestPlain.MChunks {
+				chunkIndex[hex.EncodeToString(chunk.ChunkID)] = chunk
+			}
+			for _, stripe := range manifest.ManifestPlain.MStripes {
+				stripeIndex[hex.EncodeToString(stripe.StripeID)] = stripe
+			}
+
+			for _, tree := range manifest.ManifestPlain.Trees {
+				applyTreeFilesForRestore(fileIndex, tree, tree.RootDirectory)
+			}
+
+			for _, tombstone := range manifest.ManifestPlain.Tombstones {
+				delete(fileIndex, normalizeDatasetPath(tombstone))
+			}
+		}
+	}
+
+	if !resolvedAny {
+		return nil, nil, nil, errors.New("no head's manifest chain could be resolved")
+	}
+
+	return fileIndex, chunkIndex, stripeIndex, nil
+}
+
+func applyTreeFilesForRestore(entries map[string]restoreFileEntry, tree types.Tree, prefix string) {
+	prefix = normalizeDatasetPath(prefix)
+
+	for _, file := range tree.Files {
+		path := normalizeDatasetPath(filepath.Join(prefix, file.FileName))
+		entries[path] = restoreFileEntry{
+			ChunkIDs: file.ChunkIDs,
+		}
+	}
+
+	for _, child := range tree.ChildDirectories {
+		if child != nil {
+			applyTreeFilesForRestore(entries, *child, filepath.Join(prefix, child.RootDirectory))
+		}
+	}
 }
