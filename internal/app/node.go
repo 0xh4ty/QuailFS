@@ -168,6 +168,7 @@ func RunNode(enableRelay bool) {
 
 	defer kad.Close()
 
+	network.StartProviderAds(ctx, kad, db)
 	go watchRoutingTable(ctx, kad)
 
 	select {}

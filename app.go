@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/0xh4ty/quailfs/internal/catalog"
 	"github.com/0xh4ty/quailfs/internal/keys"
 	"github.com/0xh4ty/quailfs/internal/network"
 	"github.com/0xh4ty/quailfs/internal/pipeline"
@@ -13,6 +14,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +41,8 @@ type App struct {
 	bootstrapPeers []peer.AddrInfo
 	libp2pHost     host.Host
 	kad            *dht.IpfsDHT
+
+	catalogObjects []network.CatalogBlob
 }
 
 type UserInfo struct {
@@ -244,7 +248,54 @@ func (a *App) ConfigureBootstrapNodes(addresses []string) error {
 	a.libp2pHost = h
 	a.kad = kad
 
+	a.fetchCatalogObjects(a.ctx, kad)
+
 	return nil
+}
+
+func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
+	a.mu.RLock()
+	userID := a.userID
+	pub := a.ed25519PublicKey
+	var datasetIDs [][]byte
+	for _, d := range a.datasets {
+		datasetIDs = append(datasetIDs, d.DatasetID)
+	}
+	a.mu.RUnlock()
+
+	if len(userID) == 0 {
+		return
+	}
+
+	lookupKeys := [][]byte{keys.DeriveUserIndexKey(userID)}
+	for _, id := range datasetIDs {
+		lookupKeys = append(lookupKeys, keys.DeriveHeadKey(userID, id))
+	}
+
+	var fetched []network.CatalogBlob
+
+	for _, key := range lookupKeys {
+		blobs, err := network.FetchCatalogObjects(ctx, kad, key)
+		if err != nil {
+			log.Printf("catalog: fetch failed: %v", err)
+			continue
+		}
+
+		for _, b := range blobs {
+			// Verify against our own key, never one supplied by the node.
+			if err := catalog.VerifyCatalogObject(b.Type, b.Data, pub); err != nil {
+				log.Printf("catalog: dropping %s: %v", b.Name, err)
+				continue
+			}
+			fetched = append(fetched, b)
+		}
+	}
+
+	a.mu.Lock()
+	a.catalogObjects = fetched
+	a.mu.Unlock()
+
+	log.Printf("catalog: fetched %d verified object(s)", len(fetched))
 }
 
 func (a *App) CreateDataset(label string) (DatasetInfo, error) {

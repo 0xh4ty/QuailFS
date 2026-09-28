@@ -48,3 +48,18 @@ func DeriveNameKey(datasetKey []byte, datasetID []byte) ([]byte, error) {
 	}
 	return nameKey, nil
 }
+
+func DeriveUserIndexKey(userID []byte) []byte {
+	hash := sha256.New()
+	hash.Write([]byte("quailfs/userindex/v1"))
+	hash.Write(userID)
+	return hash.Sum(nil)
+}
+
+func DeriveHeadKey(userID []byte, datasetID []byte) []byte {
+	hash := sha256.New()
+	hash.Write([]byte("quailfs/headkey/v1"))
+	hash.Write(userID)
+	hash.Write(datasetID)
+	return hash.Sum(nil)
+}

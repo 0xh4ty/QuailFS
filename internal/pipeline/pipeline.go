@@ -3,7 +3,6 @@ package pipeline
 import (
 	"context"
 	crand "crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"github.com/0xh4ty/quailfs/internal/backup"
@@ -124,21 +123,6 @@ func backupFile(path string, datasetID []byte, datasetKey []byte) (types.File, [
 		stripeIDs: stripeIDs,
 		shards:    shardCollection,
 	}, nil
-}
-
-func deriveUserIndexKey(userID []byte) []byte {
-	hash := sha256.New()
-	hash.Write([]byte("quailfs/userindex/v1"))
-	hash.Write(userID)
-	return hash.Sum(nil)
-}
-
-func deriveHeadKey(userID []byte, datasetID []byte) []byte {
-	hash := sha256.New()
-	hash.Write([]byte("quailfs/headkey/v1"))
-	hash.Write(userID)
-	hash.Write(datasetID)
-	return hash.Sum(nil)
 }
 
 func randomCatalogSuffix() (string, error) {
@@ -365,8 +349,8 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 
 	log.Printf("Backup: all shards uploaded successfully")
 
-	userIndexKey := deriveUserIndexKey(userID)
-	headKey := deriveHeadKey(userID, datasetID)
+	userIndexKey := keys.DeriveUserIndexKey(userID)
+	headKey := keys.DeriveHeadKey(userID, datasetID)
 
 	userIndexSuffix, err := randomCatalogSuffix()
 	if err != nil {
