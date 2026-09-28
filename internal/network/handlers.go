@@ -30,6 +30,10 @@ func RegisterHandlers(h host.Host, db *bbolt.DB) {
 	h.SetStreamHandler(GetCatalogProtocol, func(stream network.Stream) {
 		handleGetCatalog(stream, db)
 	})
+
+	h.SetStreamHandler(GetShardProtocol, func(stream network.Stream) {
+		handleGetShard(stream, db)
+	})
 }
 
 func handlePutShard(stream network.Stream, db *bbolt.DB) {
@@ -295,5 +299,67 @@ func handleGetCatalog(stream network.Stream, db *bbolt.DB) {
 	}
 	if err := writer.Flush(); err != nil {
 		log.Printf("GET_CATALOG: flush: %v", err)
+	}
+}
+
+func handleGetShard(stream network.Stream, db *bbolt.DB) {
+	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(60 * time.Second))
+
+	reader := bufio.NewReader(stream)
+	writer := bufio.NewWriter(stream)
+
+	shardName, err := readString(reader)
+	if err != nil {
+		writeResponse(writer, false)
+		return
+	}
+
+	if !validShardName(shardName) {
+		writeResponse(writer, false)
+		return
+	}
+
+	var shardPath string
+
+	err = db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("inventory"))
+		if b == nil {
+			return fmt.Errorf("inventory bucket not found")
+		}
+
+		value := b.Get([]byte(shardName))
+		if value == nil {
+			return fmt.Errorf("shard not found")
+		}
+
+		shardPath = string(value)
+		return nil
+	})
+	if err != nil {
+		writeResponse(writer, false)
+		return
+	}
+
+	shard, err := os.ReadFile(shardPath)
+	if err != nil {
+		writeResponse(writer, false)
+		return
+	}
+
+	if err := writer.WriteByte(1); err != nil {
+		return
+	}
+
+	if err := binary.Write(writer, binary.BigEndian, uint64(len(shard))); err != nil {
+		return
+	}
+
+	if _, err := writer.Write(shard); err != nil {
+		return
+	}
+
+	if err := writer.Flush(); err != nil {
+		log.Printf("GET_SHARD: flush: %v", err)
 	}
 }
