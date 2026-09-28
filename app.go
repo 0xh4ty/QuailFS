@@ -754,6 +754,8 @@ func (a *App) Backup(datasetID string, paths []string) error {
 		return errors.New("dataset not found")
 	}
 
+	zeroParentManifestID := make([]byte, 32)
+
 	return pipeline.Backup(
 		a.ctx,
 		paths,
@@ -763,7 +765,7 @@ func (a *App) Backup(datasetID string, paths []string) error {
 		dataset.CatalogKey,
 		dataset.Label,
 		1,
-		nil,
+		zeroParentManifestID,
 		a.x25519PublicKey,
 		a.ed25519PrivateKey,
 		a.ed25519PublicKey,
