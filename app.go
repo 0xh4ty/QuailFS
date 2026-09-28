@@ -564,6 +564,8 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 	// -----------------Fetch Manifest objects---------------------
 
 	for _, manifestID := range manifestIDs {
+		log.Printf("catalog: fetching manifest objects for %x", manifestID)
+
 		manifestBlobs, err := network.FetchCatalogObjects(ctx, kad, manifestID)
 		if err != nil {
 			log.Printf(
@@ -573,6 +575,12 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 			)
 			continue
 		}
+
+		log.Printf(
+			"catalog: fetched %d manifest object(s) for %x",
+			len(manifestBlobs),
+			manifestID,
+		)
 
 		catalogKey, ok := manifestCatalogKeys[hex.EncodeToString(manifestID)]
 		if !ok {
@@ -584,10 +592,19 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 		}
 
 		for _, blob := range manifestBlobs {
+			log.Printf(
+				"catalog: processing manifest %s, type=%d, size=%d",
+				blob.Name,
+				blob.Type,
+				len(blob.Data),
+			)
+
 			if err := catalog.VerifyCatalogObject(blob.Type, blob.Data, pub); err != nil {
 				log.Printf("catalog: dropping manifest %s: %v", blob.Name, err)
 				continue
 			}
+
+			log.Printf("catalog: manifest %s verified", blob.Name)
 
 			manifest, err := backup.DeserializeManifestEnvelope(blob.Data)
 			if err != nil {
@@ -599,6 +616,8 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 				continue
 			}
 
+			log.Printf("catalog: manifest %s deserialized", blob.Name)
+
 			if err := catalog.OpenManifestEnvelope(&manifest, catalogKey); err != nil {
 				log.Printf(
 					"catalog: failed to open manifest %s: %v",
@@ -608,8 +627,12 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 				continue
 			}
 
+			log.Printf("catalog: manifest %s opened", blob.Name)
+
 			fetched = append(fetched, blob)
 		}
+
+		log.Printf("catalog: finished processing manifest %x", manifestID)
 	}
 
 	a.mu.Lock()
