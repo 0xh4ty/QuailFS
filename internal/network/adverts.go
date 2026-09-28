@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const AdInterval = 10 * time.Minute
+const AdInterval = 1 * time.Minute
 
 func ShardCID(shardName string) (cid.Cid, error) {
 	sum, err := mh.Sum([]byte(shardName), mh.SHA2_256, -1)
