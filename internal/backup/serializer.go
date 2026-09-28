@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"github.com/0xh4ty/quailfs/pkg/types"
+	"log"
 )
 
 func serializeQChunks(qchunks []types.QChunk) []byte {
@@ -768,6 +769,8 @@ func DeserializeFiles(data []byte) ([]types.File, int, error) {
 	filesCount := binary.BigEndian.Uint64(data[offset : offset+8])
 	offset += 8
 
+	log.Printf("manifest: DeserializeFiles filesCount=%d, remaining=%d", filesCount, len(data)-offset)
+
 	files := make([]types.File, 0, filesCount)
 
 	for range filesCount {
@@ -791,6 +794,8 @@ func DeserializeFiles(data []byte) ([]types.File, int, error) {
 
 		chunkIDCount := binary.BigEndian.Uint64(data[offset : offset+8])
 		offset += 8
+
+		log.Printf("manifest: DeserializeFiles file=%q chunkIDCount=%d, remaining=%d", fileName, chunkIDCount, len(data)-offset)
 
 		chunkIDs := make([][]byte, 0, chunkIDCount)
 
@@ -824,6 +829,8 @@ func DeserializeTrees(data []byte) ([]types.Tree, int, error) {
 	treeCount := binary.BigEndian.Uint64(data[offset : offset+8])
 	offset += 8
 
+	log.Printf("manifest: DeserializeTrees treeCount=%d, remaining=%d", treeCount, len(data)-offset)
+
 	trees := make([]types.Tree, 0, treeCount)
 
 	for range treeCount {
@@ -841,6 +848,8 @@ func DeserializeTrees(data []byte) ([]types.Tree, int, error) {
 		rootDirectory := string(data[offset : offset+int(rootDirectoryLen)])
 		offset += int(rootDirectoryLen)
 
+		log.Printf("manifest: DeserializeTrees rootDirectory=%q", rootDirectory)
+
 		files, consumed, err := DeserializeFiles(data[offset:])
 		if err != nil {
 			return nil, 0, fmt.Errorf("deserialize files: %w", err)
@@ -853,6 +862,8 @@ func DeserializeTrees(data []byte) ([]types.Tree, int, error) {
 
 		childDirectoryCount := binary.BigEndian.Uint64(data[offset : offset+8])
 		offset += 8
+
+		log.Printf("manifest: DeserializeTrees childDirectoryCount=%d, remaining=%d", childDirectoryCount, len(data)-offset)
 
 		childDirectories := make([]*types.Tree, 0, childDirectoryCount)
 
@@ -889,6 +900,8 @@ func DeserializeMChunks(data []byte) ([]types.MChunk, int, error) {
 
 	mchunksCount := binary.BigEndian.Uint64(data[offset : offset+8])
 	offset += 8
+
+	log.Printf("manifest: DeserializeMChunks mchunksCount=%d, remaining=%d", mchunksCount, len(data)-offset)
 
 	mchunks := make([]types.MChunk, 0, mchunksCount)
 
@@ -936,6 +949,8 @@ func DeserializeMStripes(data []byte) ([]types.MStripe, int, error) {
 	mstripesCount := binary.BigEndian.Uint64(data[offset : offset+8])
 	offset += 8
 
+	log.Printf("manifest: DeserializeMStripes mstripesCount=%d, remaining=%d", mstripesCount, len(data)-offset)
+
 	mstripes := make([]types.MStripe, 0, mstripesCount)
 
 	for range mstripesCount {
@@ -974,6 +989,8 @@ func DeserializeMStripes(data []byte) ([]types.MStripe, int, error) {
 		shardNamesCount := binary.BigEndian.Uint64(data[offset : offset+8])
 		offset += 8
 
+		log.Printf("manifest: DeserializeMStripes stripe=%x shardNamesCount=%d, K=%d, N=%d, payloadLen=%d, remaining=%d", stripeID, shardNamesCount, k, n, payloadLen, len(data)-offset)
+
 		shardNames := make([][]byte, 0, shardNamesCount)
 
 		for range shardNamesCount {
@@ -1009,6 +1026,8 @@ func DeserializeTombstones(data []byte) ([]string, int, error) {
 	tombstonesCount := binary.BigEndian.Uint64(data[offset : offset+8])
 	offset += 8
 
+	log.Printf("manifest: DeserializeTombstones tombstonesCount=%d, remaining=%d", tombstonesCount, len(data)-offset)
+
 	tombstones := make([]string, 0, tombstonesCount)
 
 	for range tombstonesCount {
@@ -1035,6 +1054,8 @@ func DeserializeTombstones(data []byte) ([]string, int, error) {
 func DeserializeManifestPlain(data []byte) (types.ManifestPlain, int, error) {
 	offset := 0
 
+	log.Printf("manifest: DeserializeManifestPlain data length=%d", len(data))
+
 	if len(data) < offset+32 {
 		return types.ManifestPlain{}, 0, fmt.Errorf("invalid manifest: missing dataset ID")
 	}
@@ -1056,11 +1077,15 @@ func DeserializeManifestPlain(data []byte) (types.ManifestPlain, int, error) {
 	parentManifestID := append([]byte(nil), data[offset:offset+32]...)
 	offset += 32
 
+	log.Printf("manifest: header parsed, generation=%d, parentManifestID=%x, next offset=%d, remaining=%d", generation, parentManifestID, offset, len(data)-offset)
+
 	trees, consumed, err := DeserializeTrees(data[offset:])
 	if err != nil {
 		return types.ManifestPlain{}, 0, fmt.Errorf("deserialize trees: %w", err)
 	}
 	offset += consumed
+
+	log.Printf("manifest: trees deserialized, count=%d, consumed=%d, next offset=%d", len(trees), consumed, offset)
 
 	mchunks, consumed, err := DeserializeMChunks(data[offset:])
 	if err != nil {
@@ -1068,17 +1093,23 @@ func DeserializeManifestPlain(data []byte) (types.ManifestPlain, int, error) {
 	}
 	offset += consumed
 
+	log.Printf("manifest: mchunks deserialized, count=%d, consumed=%d, next offset=%d", len(mchunks), consumed, offset)
+
 	mstripes, consumed, err := DeserializeMStripes(data[offset:])
 	if err != nil {
 		return types.ManifestPlain{}, 0, fmt.Errorf("deserialize mstripes: %w", err)
 	}
 	offset += consumed
 
+	log.Printf("manifest: mstripes deserialized, count=%d, consumed=%d, next offset=%d", len(mstripes), consumed, offset)
+
 	tombstones, consumed, err := DeserializeTombstones(data[offset:])
 	if err != nil {
 		return types.ManifestPlain{}, 0, fmt.Errorf("deserialize tombstones: %w", err)
 	}
 	offset += consumed
+
+	log.Printf("manifest: tombstones deserialized, count=%d, consumed=%d, next offset=%d", len(tombstones), consumed, offset)
 
 	return types.ManifestPlain{
 		DatasetID:        datasetID,

@@ -67,18 +67,23 @@ func backupFile(path string, datasetID []byte, datasetKey []byte) (types.File, [
 	var stripeIDs [][]byte
 	var shardCollection [][][]byte
 
+	chunkStripe := make(map[string][]byte)
+
 	for _, qchunk := range qchunks {
 		mChunks = append(mChunks, types.MChunk{
-			ChunkID:  qchunk.ChunkID,
-			Size:     uint64(len(qchunk.Data)),
-			StripeID: nil,
+			ChunkID: qchunk.ChunkID,
+			Size:    uint64(len(qchunk.Data)),
 		})
 
 		file.ChunkIDs = append(file.ChunkIDs, qchunk.ChunkID)
 	}
 
-	for _, stripe := range packedStripeSerialized {
+	for i, stripe := range packedStripeSerialized {
 		stripeID := keys.DeriveStripeID(datasetID, stripe)
+
+		for _, qchunk := range packedStripePlain[i].QChunks {
+			chunkStripe[string(qchunk.ChunkID)] = stripeID
+		}
 
 		stripeKey, err := keys.DeriveStripeKey(datasetKey, datasetID, stripeID)
 		if err != nil {
@@ -117,6 +122,15 @@ func backupFile(path string, datasetID []byte, datasetKey []byte) (types.File, [
 			PayloadLen: uint64(len(encryptedStripe)),
 			ShardNames: shardNames,
 		})
+	}
+
+	for i := range mChunks {
+		stripeID, ok := chunkStripe[string(mChunks[i].ChunkID)]
+		if !ok {
+			return types.File{}, nil, nil, backupShards{}, fmt.Errorf("chunk %x not found in any stripe", mChunks[i].ChunkID)
+		}
+
+		mChunks[i].StripeID = stripeID
 	}
 
 	return file, mChunks, mStripes, backupShards{
