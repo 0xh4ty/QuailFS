@@ -8,12 +8,25 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"io"
+	"strings"
+	"time"
 )
 
 const PutShardProtocol = "/quailfs/put-shard/1.0.0"
 const PutCatalogProtocol = "/quailfs/put-catalog/1.0.0"
 const GetShardProtocol = "/quailfs/get-shard/1.0.0"
 const GetCatalogProtocol = "/quailfs/get-catalog/1.0.0"
+
+const (
+	maxCatalogObjects    = 4096
+	maxCatalogObjectSize = 64 << 20
+)
+
+type CatalogBlob struct {
+	Name string
+	Type uint8
+	Data []byte
+}
 
 func PutShard(ctx context.Context, h host.Host, peerID peer.ID, shardName string, shard []byte) error {
 	stream, err := h.NewStream(ctx, peerID, PutShardProtocol)
@@ -198,59 +211,78 @@ func GetShard(ctx context.Context, h host.Host, peerID peer.ID, shardName string
 	return shard, nil
 }
 
-func GetCatalog(ctx context.Context, h host.Host, peerID peer.ID, objectName string) (uint8, []byte, []byte, error) {
+func catalogTypeFromName(name string) uint8 {
+	switch strings.SplitN(name, ":", 2)[0] {
+	case "userindex":
+		return 1
+	case "head":
+		return 2
+	case "manifest":
+		return 4
+	}
+	return 0
+}
+
+func GetCatalog(ctx context.Context, h host.Host, peerID peer.ID, keyHex string) ([]CatalogBlob, error) {
 	stream, err := h.NewStream(ctx, peerID, GetCatalogProtocol)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("open GET_CATALOG stream: %w", err)
+		return nil, fmt.Errorf("open GET_CATALOG stream: %w", err)
 	}
 	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(60 * time.Second))
 
 	writer := bufio.NewWriter(stream)
 	reader := bufio.NewReader(stream)
 
-	if err := writeString(writer, objectName); err != nil {
-		return 0, nil, nil, fmt.Errorf("write catalog object name: %w", err)
+	if err := writeString(writer, keyHex); err != nil {
+		return nil, fmt.Errorf("write key: %w", err)
 	}
-
 	if err := writer.Flush(); err != nil {
-		return 0, nil, nil, fmt.Errorf("flush catalog request: %w", err)
+		return nil, fmt.Errorf("flush request: %w", err)
 	}
 
-	success, err := readResponse(reader)
+	ok, err := readResponse(reader)
 	if err != nil {
-		return 0, nil, nil, fmt.Errorf("read GET_CATALOG response: %w", err)
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("peer rejected request")
 	}
 
-	if !success {
-		return 0, nil, nil, fmt.Errorf("peer rejected catalog request")
+	var count uint32
+	if err := binary.Read(reader, binary.BigEndian, &count); err != nil {
+		return nil, fmt.Errorf("read count: %w", err)
+	}
+	if count > maxCatalogObjects {
+		return nil, fmt.Errorf("too many catalog objects: %d", count)
 	}
 
-	objectType, err := reader.ReadByte()
-	if err != nil {
-		return 0, nil, nil, fmt.Errorf("read catalog object type: %w", err)
+	blobs := make([]CatalogBlob, 0, count)
+	for i := uint32(0); i < count; i++ {
+		name, err := readString(reader)
+		if err != nil {
+			return nil, fmt.Errorf("read object name: %w", err)
+		}
+
+		var size uint64
+		if err := binary.Read(reader, binary.BigEndian, &size); err != nil {
+			return nil, fmt.Errorf("read object size: %w", err)
+		}
+		if size > maxCatalogObjectSize {
+			return nil, fmt.Errorf("catalog object too large: %d", size)
+		}
+
+		data := make([]byte, size)
+		if _, err := io.ReadFull(reader, data); err != nil {
+			return nil, fmt.Errorf("read object: %w", err)
+		}
+
+		blobs = append(blobs, CatalogBlob{
+			Name: name,
+			Type: catalogTypeFromName(name),
+			Data: data,
+		})
 	}
 
-	ed25519PublicKey := make([]byte, 32)
-
-	if _, err := io.ReadFull(reader, ed25519PublicKey); err != nil {
-		return 0, nil, nil, fmt.Errorf("read Ed25519 public key: %w", err)
-	}
-
-	var size uint64
-
-	if err := binary.Read(reader, binary.BigEndian, &size); err != nil {
-		return 0, nil, nil, fmt.Errorf("read catalog size: %w", err)
-	}
-
-	if size > uint64(^uint(0)>>1) {
-		return 0, nil, nil, fmt.Errorf("catalog too large")
-	}
-
-	catalog := make([]byte, int(size))
-
-	if _, err := io.ReadFull(reader, catalog); err != nil {
-		return 0, nil, nil, fmt.Errorf("read catalog: %w", err)
-	}
-
-	return objectType, ed25519PublicKey, catalog, nil
+	return blobs, nil
 }
