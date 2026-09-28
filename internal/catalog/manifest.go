@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"fmt"
 	"github.com/0xh4ty/quailfs/internal/backup"
 	"github.com/0xh4ty/quailfs/internal/codec"
 	"github.com/0xh4ty/quailfs/pkg/types"
@@ -44,4 +45,23 @@ func CreateManifest(datasetID []byte, generation uint64, parentManifestID []byte
 	manifest.ManifestID = manifestID[:]
 
 	return manifest, nil
+}
+
+func OpenManifestEnvelope(manifest *types.ManifestEnvelope, catalogKey []byte) error {
+	serializedManifestPlain, err := codec.DecryptManifest(
+		catalogKey,
+		manifest.Envelope,
+	)
+	if err != nil {
+		return fmt.Errorf("decrypt manifest: %w", err)
+	}
+
+	manifestPlain, _, err := backup.DeserializeManifestPlain(serializedManifestPlain)
+	if err != nil {
+		return fmt.Errorf("deserialize manifest plain: %w", err)
+	}
+
+	manifest.ManifestPlain = manifestPlain
+
+	return nil
 }

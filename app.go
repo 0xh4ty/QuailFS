@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/0xh4ty/quailfs/internal/backup"
 	"github.com/0xh4ty/quailfs/internal/catalog"
 	"github.com/0xh4ty/quailfs/internal/keys"
 	"github.com/0xh4ty/quailfs/internal/network"
@@ -255,39 +256,231 @@ func (a *App) ConfigureBootstrapNodes(addresses []string) error {
 
 func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 	a.mu.RLock()
-	userID := a.userID
-	pub := a.ed25519PublicKey
-	var datasetIDs [][]byte
-	for _, d := range a.datasets {
-		datasetIDs = append(datasetIDs, d.DatasetID)
-	}
+	userID := append([]byte(nil), a.userID...)
+	pub := append([]byte(nil), a.ed25519PublicKey...)
+	x25519PrivateKey := append([]byte(nil), a.x25519PrivateKey...)
 	a.mu.RUnlock()
 
 	if len(userID) == 0 {
 		return
 	}
 
-	lookupKeys := [][]byte{keys.DeriveUserIndexKey(userID)}
-	for _, id := range datasetIDs {
-		lookupKeys = append(lookupKeys, keys.DeriveHeadKey(userID, id))
-	}
-
 	var fetched []network.CatalogBlob
 
-	for _, key := range lookupKeys {
-		blobs, err := network.FetchCatalogObjects(ctx, kad, key)
-		if err != nil {
-			log.Printf("catalog: fetch failed: %v", err)
+	// -------------------Fetch UserIndex objects------------------
+
+	userIndexKey := keys.DeriveUserIndexKey(userID)
+
+	userIndexBlobs, err := network.FetchCatalogObjects(ctx, kad, userIndexKey)
+	if err != nil {
+		log.Printf("catalog: user index fetch failed: %v", err)
+		return
+	}
+
+	var datasetIDs [][]byte
+
+	for _, blob := range userIndexBlobs {
+		if err := catalog.VerifyCatalogObject(blob.Type, blob.Data, pub); err != nil {
+			log.Printf("catalog: dropping user index %s: %v", blob.Name, err)
 			continue
 		}
 
-		for _, b := range blobs {
-			// Verify against our own key, never one supplied by the node.
-			if err := catalog.VerifyCatalogObject(b.Type, b.Data, pub); err != nil {
-				log.Printf("catalog: dropping %s: %v", b.Name, err)
+		fetched = append(fetched, blob)
+
+		userIndex, err := backup.DeserializeUserIndex(blob.Data)
+		if err != nil {
+			log.Printf(
+				"catalog: failed to deserialize user index %s: %v",
+				blob.Name,
+				err,
+			)
+			continue
+		}
+
+		for _, dataset := range userIndex.Body.Datasets {
+			datasetID := append([]byte(nil), dataset.DatasetID...)
+
+			alreadyExists := false
+
+			for _, existingID := range datasetIDs {
+				if string(existingID) == string(datasetID) {
+					alreadyExists = true
+					break
+				}
+			}
+
+			if !alreadyExists {
+				datasetIDs = append(datasetIDs, datasetID)
+			}
+		}
+	}
+
+	// ---------Fetch Head objects and unwrap DatasetKeys----------
+
+	var manifestIDs [][]byte
+	manifestCatalogKeys := make(map[string][]byte)
+
+	for _, datasetID := range datasetIDs {
+		headKey := keys.DeriveHeadKey(userID, datasetID)
+
+		headBlobs, err := network.FetchCatalogObjects(ctx, kad, headKey)
+		if err != nil {
+			log.Printf(
+				"catalog: head fetch failed for dataset %x: %v",
+				datasetID,
+				err,
+			)
+			continue
+		}
+
+		for _, blob := range headBlobs {
+			if err := catalog.VerifyCatalogObject(blob.Type, blob.Data, pub); err != nil {
+				log.Printf("catalog: dropping head %s: %v", blob.Name, err)
 				continue
 			}
-			fetched = append(fetched, b)
+
+			head, wrappedDataset, err := backup.DeserializeHeadCatalog(blob.Data)
+			if err != nil {
+				log.Printf(
+					"catalog: failed to deserialize head %s: %v",
+					blob.Name,
+					err,
+				)
+				continue
+			}
+
+			datasetKey, err := keys.UnwrapDatasetKey(
+				wrappedDataset,
+				x25519PrivateKey,
+			)
+			if err != nil {
+				log.Printf(
+					"catalog: failed to unwrap dataset key %s: %v",
+					blob.Name,
+					err,
+				)
+				continue
+			}
+
+			catalogKey, err := keys.DeriveCatalogKey(
+				datasetKey,
+				datasetID,
+			)
+			if err != nil {
+				log.Printf(
+					"catalog: failed to derive catalog key for dataset %x: %v",
+					datasetID,
+					err,
+				)
+				continue
+			}
+
+			dataKey, err := keys.DeriveDataKey(
+				datasetKey,
+				datasetID,
+			)
+			if err != nil {
+				log.Printf(
+					"catalog: failed to derive data key for dataset %x: %v",
+					datasetID,
+					err,
+				)
+				continue
+			}
+
+			nameKey, err := keys.DeriveNameKey(
+				datasetKey,
+				datasetID,
+			)
+			if err != nil {
+				log.Printf(
+					"catalog: failed to derive name key for dataset %x: %v",
+					datasetID,
+					err,
+				)
+				continue
+			}
+
+			a.mu.Lock()
+			a.datasets[hex.EncodeToString(datasetID)] = DatasetSession{
+				DatasetID:  append([]byte(nil), datasetID...),
+				DatasetKey: append([]byte(nil), datasetKey...),
+				CatalogKey: append([]byte(nil), catalogKey...),
+				DataKey:    append([]byte(nil), dataKey...),
+				NameKey:    append([]byte(nil), nameKey...),
+				Label:      wrappedDataset.Body.Label,
+			}
+			a.mu.Unlock()
+
+			fetched = append(fetched, blob)
+
+			manifestID := append([]byte(nil), head.Body.ManifestID...)
+
+			manifestCatalogKeys[hex.EncodeToString(manifestID)] = append([]byte(nil), catalogKey...)
+
+			alreadyExists := false
+
+			for _, existingID := range manifestIDs {
+				if string(existingID) == string(manifestID) {
+					alreadyExists = true
+					break
+				}
+			}
+
+			if !alreadyExists {
+				manifestIDs = append(manifestIDs, manifestID)
+			}
+		}
+	}
+
+	// -----------------Fetch Manifest objects---------------------
+
+	for _, manifestID := range manifestIDs {
+		manifestBlobs, err := network.FetchCatalogObjects(ctx, kad, manifestID)
+		if err != nil {
+			log.Printf(
+				"catalog: manifest fetch failed for %x: %v",
+				manifestID,
+				err,
+			)
+			continue
+		}
+
+		catalogKey, ok := manifestCatalogKeys[hex.EncodeToString(manifestID)]
+		if !ok {
+			log.Printf(
+				"catalog: catalog key not found for manifest %x",
+				manifestID,
+			)
+			continue
+		}
+
+		for _, blob := range manifestBlobs {
+			if err := catalog.VerifyCatalogObject(blob.Type, blob.Data, pub); err != nil {
+				log.Printf("catalog: dropping manifest %s: %v", blob.Name, err)
+				continue
+			}
+
+			manifest, err := backup.DeserializeManifestEnvelope(blob.Data)
+			if err != nil {
+				log.Printf(
+					"catalog: failed to deserialize manifest %s: %v",
+					blob.Name,
+					err,
+				)
+				continue
+			}
+
+			if err := catalog.OpenManifestEnvelope(&manifest, catalogKey); err != nil {
+				log.Printf(
+					"catalog: failed to open manifest %s: %v",
+					blob.Name,
+					err,
+				)
+				continue
+			}
+
+			fetched = append(fetched, blob)
 		}
 	}
 
@@ -295,7 +488,12 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 	a.catalogObjects = fetched
 	a.mu.Unlock()
 
-	log.Printf("catalog: fetched %d verified object(s)", len(fetched))
+	log.Printf(
+		"catalog: fetched %d verified object(s), %d dataset(s), %d manifest(s)",
+		len(fetched),
+		len(datasetIDs),
+		len(manifestIDs),
+	)
 }
 
 func (a *App) CreateDataset(label string) (DatasetInfo, error) {

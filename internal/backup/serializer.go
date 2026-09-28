@@ -757,3 +757,336 @@ func DeserializeCatalogObject(objectType uint8, data []byte) error {
 		return fmt.Errorf("unknown catalog object type: %d", objectType)
 	}
 }
+
+func DeserializeFiles(data []byte) ([]types.File, int, error) {
+	offset := 0
+
+	if len(data) < offset+8 {
+		return nil, 0, fmt.Errorf("invalid files: missing file count")
+	}
+
+	filesCount := binary.BigEndian.Uint64(data[offset : offset+8])
+	offset += 8
+
+	files := make([]types.File, 0, filesCount)
+
+	for range filesCount {
+		if len(data) < offset+8 {
+			return nil, 0, fmt.Errorf("invalid file: missing filename length")
+		}
+
+		fileNameLen := binary.BigEndian.Uint64(data[offset : offset+8])
+		offset += 8
+
+		if fileNameLen > uint64(len(data)-offset) {
+			return nil, 0, fmt.Errorf("invalid file: filename exceeds data")
+		}
+
+		fileName := string(data[offset : offset+int(fileNameLen)])
+		offset += int(fileNameLen)
+
+		if len(data) < offset+8 {
+			return nil, 0, fmt.Errorf("invalid file: missing chunk ID count")
+		}
+
+		chunkIDCount := binary.BigEndian.Uint64(data[offset : offset+8])
+		offset += 8
+
+		chunkIDs := make([][]byte, 0, chunkIDCount)
+
+		for range chunkIDCount {
+			if len(data) < offset+32 {
+				return nil, 0, fmt.Errorf("invalid file: missing chunk ID")
+			}
+
+			chunkID := append([]byte(nil), data[offset:offset+32]...)
+			offset += 32
+
+			chunkIDs = append(chunkIDs, chunkID)
+		}
+
+		files = append(files, types.File{
+			FileName: fileName,
+			ChunkIDs: chunkIDs,
+		})
+	}
+
+	return files, offset, nil
+}
+
+func DeserializeTrees(data []byte) ([]types.Tree, int, error) {
+	offset := 0
+
+	if len(data) < offset+8 {
+		return nil, 0, fmt.Errorf("invalid trees: missing tree count")
+	}
+
+	treeCount := binary.BigEndian.Uint64(data[offset : offset+8])
+	offset += 8
+
+	trees := make([]types.Tree, 0, treeCount)
+
+	for range treeCount {
+		if len(data) < offset+8 {
+			return nil, 0, fmt.Errorf("invalid tree: missing root directory length")
+		}
+
+		rootDirectoryLen := binary.BigEndian.Uint64(data[offset : offset+8])
+		offset += 8
+
+		if rootDirectoryLen > uint64(len(data)-offset) {
+			return nil, 0, fmt.Errorf("invalid tree: root directory exceeds data")
+		}
+
+		rootDirectory := string(data[offset : offset+int(rootDirectoryLen)])
+		offset += int(rootDirectoryLen)
+
+		files, consumed, err := DeserializeFiles(data[offset:])
+		if err != nil {
+			return nil, 0, fmt.Errorf("deserialize files: %w", err)
+		}
+		offset += consumed
+
+		if len(data) < offset+8 {
+			return nil, 0, fmt.Errorf("invalid tree: missing child directory count")
+		}
+
+		childDirectoryCount := binary.BigEndian.Uint64(data[offset : offset+8])
+		offset += 8
+
+		childDirectories := make([]*types.Tree, 0, childDirectoryCount)
+
+		for range childDirectoryCount {
+			childTrees, consumed, err := DeserializeTrees(data[offset:])
+			if err != nil {
+				return nil, 0, fmt.Errorf("deserialize child tree: %w", err)
+			}
+
+			if len(childTrees) != 1 {
+				return nil, 0, fmt.Errorf("invalid child tree serialization")
+			}
+
+			offset += consumed
+			childDirectories = append(childDirectories, &childTrees[0])
+		}
+
+		trees = append(trees, types.Tree{
+			RootDirectory:    rootDirectory,
+			Files:            files,
+			ChildDirectories: childDirectories,
+		})
+	}
+
+	return trees, offset, nil
+}
+
+func DeserializeMChunks(data []byte) ([]types.MChunk, int, error) {
+	offset := 0
+
+	if len(data) < offset+8 {
+		return nil, 0, fmt.Errorf("invalid mchunks: missing count")
+	}
+
+	mchunksCount := binary.BigEndian.Uint64(data[offset : offset+8])
+	offset += 8
+
+	mchunks := make([]types.MChunk, 0, mchunksCount)
+
+	for range mchunksCount {
+		if len(data) < offset+32 {
+			return nil, 0, fmt.Errorf("invalid mchunk: missing chunk ID")
+		}
+
+		chunkID := append([]byte(nil), data[offset:offset+32]...)
+		offset += 32
+
+		if len(data) < offset+8 {
+			return nil, 0, fmt.Errorf("invalid mchunk: missing size")
+		}
+
+		size := binary.BigEndian.Uint64(data[offset : offset+8])
+		offset += 8
+
+		if len(data) < offset+32 {
+			return nil, 0, fmt.Errorf("invalid mchunk: missing stripe ID")
+		}
+
+		stripeID := append([]byte(nil), data[offset:offset+32]...)
+		offset += 32
+
+		mchunks = append(mchunks, types.MChunk{
+			ChunkID:  chunkID,
+			Size:     size,
+			StripeID: stripeID,
+		})
+	}
+
+	return mchunks, offset, nil
+}
+
+func DeserializeMStripes(data []byte) ([]types.MStripe, int, error) {
+	const shardNameSize = 66
+
+	offset := 0
+
+	if len(data) < offset+8 {
+		return nil, 0, fmt.Errorf("invalid mstripes: missing count")
+	}
+
+	mstripesCount := binary.BigEndian.Uint64(data[offset : offset+8])
+	offset += 8
+
+	mstripes := make([]types.MStripe, 0, mstripesCount)
+
+	for range mstripesCount {
+		if len(data) < offset+32 {
+			return nil, 0, fmt.Errorf("invalid mstripe: missing stripe ID")
+		}
+
+		stripeID := append([]byte(nil), data[offset:offset+32]...)
+		offset += 32
+
+		if len(data) < offset+8 {
+			return nil, 0, fmt.Errorf("invalid mstripe: missing K")
+		}
+
+		k := binary.BigEndian.Uint64(data[offset : offset+8])
+		offset += 8
+
+		if len(data) < offset+8 {
+			return nil, 0, fmt.Errorf("invalid mstripe: missing N")
+		}
+
+		n := binary.BigEndian.Uint64(data[offset : offset+8])
+		offset += 8
+
+		if len(data) < offset+8 {
+			return nil, 0, fmt.Errorf("invalid mstripe: missing payload length")
+		}
+
+		payloadLen := binary.BigEndian.Uint64(data[offset : offset+8])
+		offset += 8
+
+		if len(data) < offset+8 {
+			return nil, 0, fmt.Errorf("invalid mstripe: missing shard names count")
+		}
+
+		shardNamesCount := binary.BigEndian.Uint64(data[offset : offset+8])
+		offset += 8
+
+		shardNames := make([][]byte, 0, shardNamesCount)
+
+		for range shardNamesCount {
+			if len(data) < offset+shardNameSize {
+				return nil, 0, fmt.Errorf("invalid mstripe: missing shard name")
+			}
+
+			shardName := append([]byte(nil), data[offset:offset+shardNameSize]...)
+			offset += shardNameSize
+
+			shardNames = append(shardNames, shardName)
+		}
+
+		mstripes = append(mstripes, types.MStripe{
+			StripeID:   stripeID,
+			K:          k,
+			N:          n,
+			PayloadLen: payloadLen,
+			ShardNames: shardNames,
+		})
+	}
+
+	return mstripes, offset, nil
+}
+
+func DeserializeTombstones(data []byte) ([]string, int, error) {
+	offset := 0
+
+	if len(data) < offset+8 {
+		return nil, 0, fmt.Errorf("invalid tombstones: missing count")
+	}
+
+	tombstonesCount := binary.BigEndian.Uint64(data[offset : offset+8])
+	offset += 8
+
+	tombstones := make([]string, 0, tombstonesCount)
+
+	for range tombstonesCount {
+		if len(data) < offset+8 {
+			return nil, 0, fmt.Errorf("invalid tombstone: missing length")
+		}
+
+		tombstoneLen := binary.BigEndian.Uint64(data[offset : offset+8])
+		offset += 8
+
+		if tombstoneLen > uint64(len(data)-offset) {
+			return nil, 0, fmt.Errorf("invalid tombstone: length exceeds data")
+		}
+
+		tombstone := string(data[offset : offset+int(tombstoneLen)])
+		offset += int(tombstoneLen)
+
+		tombstones = append(tombstones, tombstone)
+	}
+
+	return tombstones, offset, nil
+}
+
+func DeserializeManifestPlain(data []byte) (types.ManifestPlain, int, error) {
+	offset := 0
+
+	if len(data) < offset+32 {
+		return types.ManifestPlain{}, 0, fmt.Errorf("invalid manifest: missing dataset ID")
+	}
+
+	datasetID := append([]byte(nil), data[offset:offset+32]...)
+	offset += 32
+
+	if len(data) < offset+8 {
+		return types.ManifestPlain{}, 0, fmt.Errorf("invalid manifest: missing generation")
+	}
+
+	generation := binary.BigEndian.Uint64(data[offset : offset+8])
+	offset += 8
+
+	if len(data) < offset+32 {
+		return types.ManifestPlain{}, 0, fmt.Errorf("invalid manifest: missing parent manifest ID")
+	}
+
+	parentManifestID := append([]byte(nil), data[offset:offset+32]...)
+	offset += 32
+
+	trees, consumed, err := DeserializeTrees(data[offset:])
+	if err != nil {
+		return types.ManifestPlain{}, 0, fmt.Errorf("deserialize trees: %w", err)
+	}
+	offset += consumed
+
+	mchunks, consumed, err := DeserializeMChunks(data[offset:])
+	if err != nil {
+		return types.ManifestPlain{}, 0, fmt.Errorf("deserialize mchunks: %w", err)
+	}
+	offset += consumed
+
+	mstripes, consumed, err := DeserializeMStripes(data[offset:])
+	if err != nil {
+		return types.ManifestPlain{}, 0, fmt.Errorf("deserialize mstripes: %w", err)
+	}
+	offset += consumed
+
+	tombstones, consumed, err := DeserializeTombstones(data[offset:])
+	if err != nil {
+		return types.ManifestPlain{}, 0, fmt.Errorf("deserialize tombstones: %w", err)
+	}
+	offset += consumed
+
+	return types.ManifestPlain{
+		DatasetID:        datasetID,
+		Generation:       generation,
+		ParentManifestID: parentManifestID,
+		Trees:            trees,
+		MChunks:          mchunks,
+		MStripes:         mstripes,
+		Tombstones:       tombstones,
+	}, offset, nil
+}

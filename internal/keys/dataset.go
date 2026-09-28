@@ -5,6 +5,9 @@ import (
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"fmt"
+	"github.com/0xh4ty/quailfs/pkg/types"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 func GenerateDatasetKey() ([]byte, error) {
@@ -62,4 +65,37 @@ func DeriveHeadKey(userID []byte, datasetID []byte) []byte {
 	hash.Write(userID)
 	hash.Write(datasetID)
 	return hash.Sum(nil)
+}
+
+func UnwrapDatasetKey(wrappedDataset types.WrappedDataset, x25519PrivateKey []byte) ([]byte, error) {
+	ephemeralPublicKey := wrappedDataset.Body.EphX25519Pubkey
+
+	sharedSecret, err := ComputeSharedSecret(
+		x25519PrivateKey,
+		ephemeralPublicKey,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	aead, err := chacha20poly1305.NewX(sharedSecret)
+	if err != nil {
+		return nil, err
+	}
+
+	encryptedDatasetKey := wrappedDataset.Body.EncDatasetKey
+
+	if len(encryptedDatasetKey) < aead.NonceSize() {
+		return nil, fmt.Errorf("encrypted dataset key is too short")
+	}
+
+	nonce := encryptedDatasetKey[:aead.NonceSize()]
+	ciphertext := encryptedDatasetKey[aead.NonceSize():]
+
+	datasetKey, err := aead.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt dataset key: %w", err)
+	}
+
+	return datasetKey, nil
 }
