@@ -320,8 +320,18 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 	var manifestIDs [][]byte
 	manifestCatalogKeys := make(map[string][]byte)
 
+	log.Printf("catalog: starting head fetch for %d dataset(s)", len(datasetIDs))
+
 	for _, datasetID := range datasetIDs {
+		log.Printf("catalog: processing dataset %x", datasetID)
+
 		headKey := keys.DeriveHeadKey(userID, datasetID)
+
+		log.Printf(
+			"catalog: derived head key %x for dataset %x",
+			headKey,
+			datasetID,
+		)
 
 		headBlobs, err := network.FetchCatalogObjects(ctx, kad, headKey)
 		if err != nil {
@@ -333,11 +343,30 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 			continue
 		}
 
+		log.Printf(
+			"catalog: fetched %d head object(s) for dataset %x",
+			len(headBlobs),
+			datasetID,
+		)
+
 		for _, blob := range headBlobs {
+			log.Printf(
+				"catalog: processing head blob %s, type=%d, size=%d",
+				blob.Name,
+				blob.Type,
+				len(blob.Data),
+			)
+
+			log.Printf("catalog: verifying head %s", blob.Name)
+
 			if err := catalog.VerifyCatalogObject(blob.Type, blob.Data, pub); err != nil {
 				log.Printf("catalog: dropping head %s: %v", blob.Name, err)
 				continue
 			}
+
+			log.Printf("catalog: head %s verified", blob.Name)
+
+			log.Printf("catalog: deserializing head %s", blob.Name)
 
 			head, wrappedDataset, err := backup.DeserializeHeadCatalog(blob.Data)
 			if err != nil {
@@ -348,6 +377,14 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 				)
 				continue
 			}
+
+			log.Printf(
+				"catalog: head %s deserialized, manifest ID=%x",
+				blob.Name,
+				head.Body.ManifestID,
+			)
+
+			log.Printf("catalog: unwrapping dataset key for head %s", blob.Name)
 
 			datasetKey, err := keys.UnwrapDatasetKey(
 				wrappedDataset,
@@ -362,6 +399,17 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 				continue
 			}
 
+			log.Printf(
+				"catalog: dataset key unwrapped for head %s, key length=%d",
+				blob.Name,
+				len(datasetKey),
+			)
+
+			log.Printf(
+				"catalog: deriving catalog key for dataset %x",
+				datasetID,
+			)
+
 			catalogKey, err := keys.DeriveCatalogKey(
 				datasetKey,
 				datasetID,
@@ -374,6 +422,17 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 				)
 				continue
 			}
+
+			log.Printf(
+				"catalog: catalog key derived for dataset %x, key length=%d",
+				datasetID,
+				len(catalogKey),
+			)
+
+			log.Printf(
+				"catalog: deriving data key for dataset %x",
+				datasetID,
+			)
 
 			dataKey, err := keys.DeriveDataKey(
 				datasetKey,
@@ -388,6 +447,17 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 				continue
 			}
 
+			log.Printf(
+				"catalog: data key derived for dataset %x, key length=%d",
+				datasetID,
+				len(dataKey),
+			)
+
+			log.Printf(
+				"catalog: deriving name key for dataset %x",
+				datasetID,
+			)
+
 			nameKey, err := keys.DeriveNameKey(
 				datasetKey,
 				datasetID,
@@ -401,6 +471,17 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 				continue
 			}
 
+			log.Printf(
+				"catalog: name key derived for dataset %x, key length=%d",
+				datasetID,
+				len(nameKey),
+			)
+
+			log.Printf(
+				"catalog: storing dataset session for dataset %x",
+				datasetID,
+			)
+
 			a.mu.Lock()
 			a.datasets[hex.EncodeToString(datasetID)] = DatasetSession{
 				DatasetID:  append([]byte(nil), datasetID...),
@@ -412,11 +493,40 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 			}
 			a.mu.Unlock()
 
+			log.Printf(
+				"catalog: dataset session stored for dataset %x, label=%q",
+				datasetID,
+				wrappedDataset.Body.Label,
+			)
+
 			fetched = append(fetched, blob)
+
+			log.Printf(
+				"catalog: extracting manifest ID from head %s",
+				blob.Name,
+			)
 
 			manifestID := append([]byte(nil), head.Body.ManifestID...)
 
-			manifestCatalogKeys[hex.EncodeToString(manifestID)] = append([]byte(nil), catalogKey...)
+			log.Printf(
+				"catalog: manifest ID=%x",
+				manifestID,
+			)
+
+			log.Printf(
+				"catalog: storing catalog key for manifest %x",
+				manifestID,
+			)
+
+			manifestCatalogKeys[hex.EncodeToString(manifestID)] = append(
+				[]byte(nil),
+				catalogKey...,
+			)
+
+			log.Printf(
+				"catalog: manifest catalog key stored for %x",
+				manifestID,
+			)
 
 			alreadyExists := false
 
@@ -427,11 +537,29 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 				}
 			}
 
-			if !alreadyExists {
-				manifestIDs = append(manifestIDs, manifestID)
+			if alreadyExists {
+				log.Printf(
+					"catalog: manifest %x already exists, skipping duplicate",
+					manifestID,
+				)
+				continue
 			}
+
+			manifestIDs = append(manifestIDs, manifestID)
+
+			log.Printf(
+				"catalog: added manifest %x, total manifests=%d",
+				manifestID,
+				len(manifestIDs),
+			)
 		}
 	}
+
+	log.Printf(
+		"catalog: finished head processing, dataset count=%d, manifest count=%d",
+		len(datasetIDs),
+		len(manifestIDs),
+	)
 
 	// -----------------Fetch Manifest objects---------------------
 
