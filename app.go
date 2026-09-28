@@ -11,14 +11,17 @@ import (
 	"github.com/0xh4ty/quailfs/internal/keys"
 	"github.com/0xh4ty/quailfs/internal/network"
 	"github.com/0xh4ty/quailfs/internal/pipeline"
+	"github.com/0xh4ty/quailfs/pkg/types"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	net "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -62,11 +65,19 @@ type DatasetSession struct {
 }
 
 type DatasetInfo struct {
-	ID         string
-	Name       string
-	Size       string
-	Files      int
-	LastBackup string
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Size       string `json:"size"`
+	Files      int    `json:"files"`
+	LastBackup string `json:"lastBackup"`
+	Generation uint64 `json:"generation"`
+}
+
+type NodeInfo struct {
+	PeerID    string `json:"peerId"`
+	Status    string `json:"status"`
+	Latency   string `json:"latency"`
+	Bootstrap bool   `json:"bootstrap"`
 }
 
 type FileEntry struct {
@@ -247,8 +258,24 @@ func (a *App) ConfigureBootstrapNodes(addresses []string) error {
 		return fmt.Errorf("bootstrap DHT: %w", err)
 	}
 
+	a.mu.Lock()
 	a.libp2pHost = h
 	a.kad = kad
+	a.bootstrapPeers = nil
+	for _, address := range addresses {
+		maddr, err := multiaddr.NewMultiaddr(address)
+		if err != nil {
+			continue
+		}
+
+		addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+		if err != nil {
+			continue
+		}
+
+		a.bootstrapPeers = append(a.bootstrapPeers, *addrInfo)
+	}
+	a.mu.Unlock()
 
 	a.fetchCatalogObjects(a.ctx, kad)
 
@@ -742,6 +769,380 @@ func (a *App) GetHomeDirectory() (string, error) {
 	return os.UserHomeDir()
 }
 
+func (a *App) ListDatasets() ([]DatasetInfo, error) {
+	a.mu.RLock()
+	if !a.unlocked {
+		a.mu.RUnlock()
+		return nil, errors.New("identity is locked")
+	}
+	datasets := make([]DatasetSession, 0, len(a.datasets))
+	for _, dataset := range a.datasets {
+		datasets = append(datasets, dataset)
+	}
+	a.mu.RUnlock()
+
+	result := make([]DatasetInfo, 0, len(datasets))
+	for _, dataset := range datasets {
+		files, generation, createdAt, err := a.getDatasetFiles(dataset)
+		if err != nil {
+			return nil, fmt.Errorf("dataset %x: %w", dataset.DatasetID, err)
+		}
+
+		var totalSize int64
+		for _, file := range files {
+			if file.Type == "file" {
+				totalSize += file.Size
+			}
+		}
+
+		lastBackup := formatLastBackup(createdAt)
+
+		result = append(result, DatasetInfo{
+			ID:         hex.EncodeToString(dataset.DatasetID),
+			Name:       dataset.Label,
+			Size:       formatBytes(totalSize),
+			Files:      len(files),
+			LastBackup: lastBackup,
+			Generation: generation,
+		})
+	}
+
+	return result, nil
+}
+
+func formatLastBackup(createdAt string) string {
+	if createdAt == "" {
+		return "Never"
+	}
+
+	t, err := time.Parse(time.RFC3339, createdAt)
+	if err != nil {
+		return createdAt
+	}
+
+	return t.Local().Format("Jan 2, 3:04 PM")
+}
+
+func (a *App) GetDatasetFiles(datasetID string) ([]FileEntry, error) {
+	a.mu.RLock()
+	if !a.unlocked {
+		a.mu.RUnlock()
+		return nil, errors.New("identity is locked")
+	}
+	dataset, ok := a.datasets[datasetID]
+	kad := a.kad
+	ctx := a.ctx
+	a.mu.RUnlock()
+
+	if !ok {
+		return nil, errors.New("dataset not found")
+	}
+	if kad == nil {
+		return nil, errors.New("DHT is not initialized")
+	}
+
+	files, _, _, err := a.getDatasetFilesWithNetwork(ctx, kad, dataset)
+	return files, err
+}
+
+func (a *App) getDatasetFiles(dataset DatasetSession) ([]FileEntry, uint64, string, error) {
+	a.mu.RLock()
+	kad := a.kad
+	ctx := a.ctx
+	a.mu.RUnlock()
+
+	if kad == nil {
+		return nil, 0, "", errors.New("DHT is not initialized")
+	}
+
+	return a.getDatasetFilesWithNetwork(ctx, kad, dataset)
+}
+
+func (a *App) getDatasetFilesWithNetwork(ctx context.Context, kad *dht.IpfsDHT, dataset DatasetSession) ([]FileEntry, uint64, string, error) {
+	a.mu.RLock()
+	userID := append([]byte(nil), a.userID...)
+	pub := append([]byte(nil), a.ed25519PublicKey...)
+	a.mu.RUnlock()
+
+	headKey := keys.DeriveHeadKey(userID, dataset.DatasetID)
+	headBlobs, err := network.FetchCatalogObjects(ctx, kad, headKey)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("fetch dataset head: %w", err)
+	}
+
+	type headRef struct {
+		manifestID []byte
+		generation uint64
+		createdAt  string
+	}
+
+	seenManifest := make(map[string]struct{})
+	var heads []headRef
+
+	for _, blob := range headBlobs {
+		if blob.Type != 2 {
+			continue
+		}
+		if err := catalog.VerifyCatalogObject(blob.Type, blob.Data, pub); err != nil {
+			continue
+		}
+
+		head, wrapped, err := backup.DeserializeHeadCatalog(blob.Data)
+		if err != nil {
+			continue
+		}
+		if !bytes.Equal(head.Body.UserID, userID) || !bytes.Equal(head.Body.DatasetID, dataset.DatasetID) {
+			continue
+		}
+		if !bytes.Equal(wrapped.Body.DatasetID, dataset.DatasetID) {
+			continue
+		}
+
+		key := hex.EncodeToString(head.Body.ManifestID)
+		if _, dup := seenManifest[key]; dup {
+			continue
+		}
+		seenManifest[key] = struct{}{}
+
+		heads = append(heads, headRef{
+			manifestID: append([]byte(nil), head.Body.ManifestID...),
+			generation: head.Body.Generation,
+			createdAt:  head.Body.CreatedAt,
+		})
+	}
+
+	if len(heads) == 0 {
+		return nil, 0, "", errors.New("no valid head found for dataset")
+	}
+
+	entries := make(map[string]FileEntry)
+	var maxGeneration uint64
+	var latestCreatedAt string
+	resolvedAny := false
+
+	for _, h := range heads {
+		chain, err := a.resolveManifestChain(ctx, kad, dataset, pub, h.manifestID)
+		if err != nil {
+			log.Printf("catalog: dataset %x: skipping head (manifest %x): %v", dataset.DatasetID, h.manifestID, err)
+			continue
+		}
+		resolvedAny = true
+
+		for i := len(chain) - 1; i >= 0; i-- {
+			manifest := chain[i]
+			chunkSizes := make(map[string]int64, len(manifest.ManifestPlain.MChunks))
+			for _, chunk := range manifest.ManifestPlain.MChunks {
+				chunkSizes[hex.EncodeToString(chunk.ChunkID)] = int64(chunk.Size)
+			}
+
+			for _, tree := range manifest.ManifestPlain.Trees {
+				applyTreeFiles(entries, tree, tree.RootDirectory, chunkSizes)
+			}
+
+			for _, tombstone := range manifest.ManifestPlain.Tombstones {
+				delete(entries, normalizeDatasetPath(tombstone))
+			}
+		}
+
+		if h.generation > maxGeneration {
+			maxGeneration = h.generation
+			latestCreatedAt = h.createdAt
+		}
+	}
+
+	if !resolvedAny {
+		return nil, 0, "", errors.New("no head's manifest chain could be resolved")
+	}
+
+	result := make([]FileEntry, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, entry)
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Path < result[j].Path
+	})
+
+	return result, maxGeneration, latestCreatedAt, nil
+}
+
+func (a *App) resolveManifestChain(
+	ctx context.Context,
+	kad *dht.IpfsDHT,
+	dataset DatasetSession,
+	pub []byte,
+	manifestID []byte,
+) ([]types.ManifestEnvelope, error) {
+	var chain []types.ManifestEnvelope
+	seen := make(map[string]struct{})
+	currentID := append([]byte(nil), manifestID...)
+
+	for len(currentID) > 0 && !isZeroBytes(currentID) {
+		key := hex.EncodeToString(currentID)
+		if _, exists := seen[key]; exists {
+			return nil, fmt.Errorf("manifest parent cycle detected at %x", currentID)
+		}
+		seen[key] = struct{}{}
+
+		blobs, err := network.FetchCatalogObjects(ctx, kad, currentID)
+		if err != nil {
+			return nil, fmt.Errorf("fetch manifest %x: %w", currentID, err)
+		}
+
+		found := false
+		for _, blob := range blobs {
+			if blob.Type != 4 {
+				continue
+			}
+			if err := catalog.VerifyCatalogObject(blob.Type, blob.Data, pub); err != nil {
+				continue
+			}
+
+			manifest, err := backup.DeserializeManifestEnvelope(blob.Data)
+			if err != nil {
+				continue
+			}
+			if !bytes.Equal(manifest.ManifestID, currentID) {
+				continue
+			}
+			if err := catalog.OpenManifestEnvelope(&manifest, dataset.CatalogKey); err != nil {
+				continue
+			}
+			if !bytes.Equal(manifest.ManifestPlain.DatasetID, dataset.DatasetID) {
+				continue
+			}
+
+			chain = append(chain, manifest)
+			currentID = append([]byte(nil), manifest.ManifestPlain.ParentManifestID...)
+			found = true
+			break
+		}
+
+		if !found {
+			return nil, fmt.Errorf("manifest %x could not be opened", currentID)
+		}
+	}
+
+	return chain, nil
+}
+
+func applyTreeFiles(entries map[string]FileEntry, tree types.Tree, prefix string, chunkSizes map[string]int64) {
+	prefix = normalizeDatasetPath(prefix)
+
+	for _, file := range tree.Files {
+		path := normalizeDatasetPath(filepath.Join(prefix, file.FileName))
+		var size int64
+		for _, chunkID := range file.ChunkIDs {
+			size += chunkSizes[hex.EncodeToString(chunkID)]
+		}
+		entries[path] = FileEntry{
+			Name: file.FileName,
+			Path: path,
+			Type: "file",
+			Size: size,
+		}
+	}
+
+	for _, child := range tree.ChildDirectories {
+		if child != nil {
+			applyTreeFiles(entries, *child, filepath.Join(prefix, child.RootDirectory), chunkSizes)
+		}
+	}
+}
+
+func normalizeDatasetPath(path string) string {
+	return strings.Trim(filepath.ToSlash(path), "/")
+}
+
+func isZeroBytes(data []byte) bool {
+	if len(data) == 0 {
+		return true
+	}
+	for _, b := range data {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func formatBytes(size int64) string {
+	if size <= 0 {
+		return "0 B"
+	}
+
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	value := float64(size)
+	unit := 0
+	for value >= 1024 && unit < len(units)-1 {
+		value /= 1024
+		unit++
+	}
+	if unit == 0 {
+		return fmt.Sprintf("%d B", size)
+	}
+	if value >= 10 {
+		return fmt.Sprintf("%.0f %s", value, units[unit])
+	}
+	return fmt.Sprintf("%.1f %s", value, units[unit])
+}
+
+func (a *App) ListNodes() ([]NodeInfo, error) {
+	a.mu.RLock()
+	if !a.unlocked {
+		a.mu.RUnlock()
+		return nil, errors.New("identity is locked")
+	}
+
+	h := a.libp2pHost
+	kad := a.kad
+	bootstrapPeers := append([]peer.AddrInfo(nil), a.bootstrapPeers...)
+	a.mu.RUnlock()
+
+	if h == nil || kad == nil {
+		return nil, errors.New("network is not initialized")
+	}
+
+	bootstrap := make(map[peer.ID]struct{}, len(bootstrapPeers))
+	for _, addrInfo := range bootstrapPeers {
+		bootstrap[addrInfo.ID] = struct{}{}
+	}
+
+	peerIDs := make(map[peer.ID]struct{})
+	for _, peerID := range kad.RoutingTable().ListPeers() {
+		if peerID != h.ID() {
+			peerIDs[peerID] = struct{}{}
+		}
+	}
+	for _, peerID := range h.Network().Peers() {
+		if peerID != h.ID() {
+			peerIDs[peerID] = struct{}{}
+		}
+	}
+
+	result := make([]NodeInfo, 0, len(peerIDs))
+	for peerID := range peerIDs {
+		status := "Offline"
+		if h.Network().Connectedness(peerID) == net.Connected {
+			status = "Online"
+		}
+
+		_, isBootstrap := bootstrap[peerID]
+		result = append(result, NodeInfo{
+			PeerID:    peerID.String(),
+			Status:    status,
+			Latency:   "-",
+			Bootstrap: isBootstrap,
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].PeerID < result[j].PeerID
+	})
+
+	return result, nil
+}
+
 func (a *App) Backup(datasetID string, paths []string) error {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -801,4 +1202,8 @@ func (a *App) Backup(datasetID string, paths []string) error {
 		a.ed25519PublicKey,
 		a.kad,
 	)
+}
+
+func (a *App) Restore(datasetID string, paths []string, destination string) (string, error) {
+	return "stub", nil
 }

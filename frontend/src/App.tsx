@@ -5,9 +5,13 @@ import {
   unlock,
   configureBootstrapNodes,
   createDataset,
+  listDatasets,
   listDirectory,
   getHomeDirectory,
   backup,
+  restore,
+  getDatasetFiles,
+  listNodes,
 } from "./api/client";
 
 type AppStage = "splash" | "unlock" | "network-setup" | "app";
@@ -18,56 +22,16 @@ type BrowseEntry = FileEntry & {
   selected?: boolean;
 };
 
-const MOCK_NODES: Node[] = [
-  {
-    peerId: "12D3KooW...8F2A",
-    status: "Online",
-    latency: "42 ms",
-    bootstrap: true,
-  },
-  {
-    peerId: "12D3KooW...91BC",
-    status: "Online",
-    latency: "87 ms",
-    bootstrap: false,
-  },
-  {
-    peerId: "12D3KooW...72DE",
-    status: "Offline",
-    latency: "—",
-    bootstrap: false,
-  },
-];
+type ActivityStatus = "running" | "success" | "error";
+type ActivityKind = "backup" | "restore";
 
-const MOCK_NETWORK_FILES: FileEntry[] = [
-  {
-    name: "Documents",
-    path: "Documents",
-    type: "directory",
-  },
-  {
-    name: "Projects",
-    path: "Projects",
-    type: "directory",
-  },
-  {
-    name: "Pictures",
-    path: "Pictures",
-    type: "directory",
-  },
-  {
-    name: "resume.pdf",
-    path: "resume.pdf",
-    type: "file",
-    size: 842_112,
-  },
-  {
-    name: "notes.txt",
-    path: "notes.txt",
-    type: "file",
-    size: 4820,
-  },
-];
+type Activity = {
+  id: number;
+  kind: ActivityKind;
+  datasetName: string;
+  status: ActivityStatus;
+  time: string;
+};
 
 function App() {
   const [stage, setStage] = useState<AppStage>("splash");
@@ -83,13 +47,19 @@ function App() {
   const [creatingDataset, setCreatingDataset] = useState(false);
   const [datasetLabel, setDatasetLabel] = useState("");
 
-  const [nodes] = useState<Node[]>(MOCK_NODES);
+  const [nodes, setNodes] = useState<Node[]>([]);
+  const [networkConnected, setNetworkConnected] = useState(false);
+
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [nextActivityId, setNextActivityId] = useState(1);
 
   const [homeDirectory, setHomeDirectory] = useState("");
   const [browseMode, setBrowseMode] = useState<BrowseMode>("local");
   const [browsePath, setBrowsePath] = useState("");
   const [browseEntries, setBrowseEntries] = useState<BrowseEntry[]>([]);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+
+  const MAX_ACTIVITIES = 20;
 
   const selectedDataset = useMemo(
     () => datasets.find((dataset) => dataset.id === selectedDatasetId),
@@ -135,9 +105,20 @@ function App() {
         });
     } else {
       setBrowsePath("/");
-      setBrowseEntries(MOCK_NETWORK_FILES);
+
+      if (!selectedDatasetId) {
+        setBrowseEntries([]);
+        return;
+      }
+
+      getDatasetFiles(selectedDatasetId)
+        .then((entries) => setBrowseEntries(entries))
+        .catch((error) => {
+          console.error("Failed to load dataset files:", error);
+          setBrowseEntries([]);
+        });
     }
-  }, [view, homeDirectory]);
+  }, [view, homeDirectory, selectedDatasetId]);
 
   const handleUnlock = async (phrase: string) => {
     const success = await unlock(phrase);
@@ -154,9 +135,36 @@ function App() {
   ): Promise<void> => {
     await configureBootstrapNodes(addresses);
 
+    try {
+      const fetchedDatasets = await listDatasets();
+
+      setDatasets(fetchedDatasets);
+
+      if (fetchedDatasets.length > 0) {
+        setSelectedDatasetId(fetchedDatasets[0].id);
+      }
+    } catch (error) {
+      console.error("Failed to load datasets:", error);
+      setDatasets([]);
+    }
+
     setBootstrapNodes(addresses);
+    setNetworkConnected(true);
     setStage("app");
   };
+
+  useEffect(() => {
+    if (stage !== "app") {
+      return;
+    }
+
+    listNodes()
+      .then(setNodes)
+      .catch((error) => {
+        console.error("Failed to load network nodes:", error);
+        setNodes([]);
+      });
+  }, [stage]);
 
   const handleSelectDataset = (datasetId: string) => {
     setSelectedDatasetId(datasetId);
@@ -177,19 +185,136 @@ function App() {
       return;
     }
 
+    const dataset = datasets.find((item) => item.id === selectedDatasetId);
+
+    if (!dataset) {
+      return;
+    }
+
+    const activityId = nextActivityId;
+
+    setNextActivityId((previous) => previous + 1);
+    setActivities((previous) =>
+      [
+        {
+          id: activityId,
+          kind: "backup",
+          datasetName: dataset.name,
+          status: "running",
+          time: "Now",
+        } satisfies Activity,
+        ...previous,
+      ].slice(0, MAX_ACTIVITIES),
+    );
+    setView("dashboard");
+
     try {
       await backup(selectedDatasetId, paths);
+
+      const completedAt = new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
+      setActivities((previous) =>
+        previous.map((activity) =>
+          activity.id === activityId
+            ? { ...activity, status: "success", time: completedAt }
+            : activity,
+        ),
+      );
+
+      const refreshed = await listDatasets();
+      setDatasets(refreshed);
     } catch (error) {
       console.error("Backup failed:", error);
+
+      setActivities((previous) =>
+        previous.map((activity) =>
+          activity.id === activityId
+            ? { ...activity, status: "error", time: "Failed" }
+            : activity,
+        ),
+      );
     }
   };
 
-  const handleStartRestore = () => {
+  const handleRestore = async () => {
+    const paths = Array.from(selectedPaths);
+
+    if (paths.length === 0 || !selectedDatasetId) {
+      return;
+    }
+
+    const dataset = datasets.find((item) => item.id === selectedDatasetId);
+
+    if (!dataset) {
+      return;
+    }
+
+    const activityId = nextActivityId;
+
+    setNextActivityId((previous) => previous + 1);
+    setActivities((previous) =>
+      [
+        {
+          id: activityId,
+          kind: "backup",
+          datasetName: dataset.name,
+          status: "running",
+          time: "Now",
+        } satisfies Activity,
+        ...previous,
+      ].slice(0, MAX_ACTIVITIES),
+    );
+    setView("dashboard");
+
+    try {
+      await restore(selectedDatasetId, paths, homeDirectory);
+
+      const completedAt = new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
+      setActivities((previous) =>
+        previous.map((activity) =>
+          activity.id === activityId
+            ? { ...activity, status: "success", time: completedAt }
+            : activity,
+        ),
+      );
+    } catch (error) {
+      console.error("Restore failed:", error);
+
+      setActivities((previous) =>
+        previous.map((activity) =>
+          activity.id === activityId
+            ? { ...activity, status: "error", time: "Failed" }
+            : activity,
+        ),
+      );
+    }
+  };
+
+  const handleStartRestore = async () => {
+    if (!selectedDatasetId) {
+      return;
+    }
+
     setBrowseMode("network");
     setBrowsePath("/");
-    setBrowseEntries(MOCK_NETWORK_FILES);
+    setBrowseEntries([]);
     setSelectedPaths(new Set());
     setView("network-browse");
+
+    try {
+      const entries = await getDatasetFiles(selectedDatasetId);
+      setBrowseEntries(entries);
+    } catch (error) {
+      console.error("Failed to load dataset files:", error);
+      setBrowseEntries([]);
+    }
   };
 
   const handleBrowseBack = () => {
@@ -210,8 +335,18 @@ function App() {
       setBrowsePath(parent);
 
       try {
-        const entries = await listDirectory(parent);
-        setBrowseEntries(entries);
+        const entries = await getDatasetFiles(selectedDatasetId);
+        const prefix = parent === "/" ? "" : `${parent.replace(/\/$/, "")}/`;
+
+        setBrowseEntries(
+          entries.filter((item) => {
+            const relative = item.path.startsWith(prefix)
+              ? item.path.slice(prefix.length)
+              : "";
+
+            return relative.length > 0 && !relative.includes("/");
+          }),
+        );
       } catch (error) {
         console.error("Failed to list parent directory:", error);
         setBrowseEntries([]);
@@ -242,6 +377,35 @@ function App() {
 
   const handleOpenDirectory = async (entry: BrowseEntry) => {
     if (entry.type !== "directory") {
+      return;
+    }
+
+    if (browseMode === "network") {
+      if (!selectedDatasetId) {
+        return;
+      }
+
+      setBrowsePath(entry.path);
+
+      try {
+        const entries = await getDatasetFiles(selectedDatasetId);
+        const prefix = `${entry.path.replace(/\/$/, "")}/`;
+
+        setBrowseEntries(
+          entries.filter((item) => {
+            if (!item.path.startsWith(prefix)) {
+              return false;
+            }
+
+            const relative = item.path.slice(prefix.length);
+            return relative.length > 0 && !relative.includes("/");
+          }),
+        );
+      } catch (error) {
+        console.error("Failed to open dataset directory:", error);
+        setBrowseEntries([]);
+      }
+
       return;
     }
 
@@ -345,6 +509,9 @@ function App() {
         onOpenDirectory={handleOpenDirectory}
         onToggleSelection={handleToggleSelection}
         onBackup={handleBackup}
+        activities={activities}
+        networkConnected={networkConnected}
+        onRestore={handleRestore}
       />
 
       {creatingDataset && (
@@ -667,6 +834,8 @@ type AppShellProps = {
   browsePath: string;
   browseEntries: BrowseEntry[];
   selectedPaths: Set<string>;
+  activities: Activity[];
+  networkConnected: boolean;
   onNavigate: (view: View) => void;
   onSelectDataset: (datasetId: string) => void;
   onCreateDataset: () => void;
@@ -677,6 +846,7 @@ type AppShellProps = {
   onOpenDirectory: (entry: BrowseEntry) => void;
   onToggleSelection: (entry: BrowseEntry) => void;
   onBackup: () => void;
+  onRestore: () => void;
 };
 
 function AppShell({
@@ -690,6 +860,8 @@ function AppShell({
   browsePath,
   browseEntries,
   selectedPaths,
+  activities,
+  networkConnected,
   onNavigate,
   onSelectDataset,
   onCreateDataset,
@@ -700,6 +872,7 @@ function AppShell({
   onOpenDirectory,
   onToggleSelection,
   onBackup,
+  onRestore,
 }: AppShellProps) {
   return (
     <div className="app-shell">
@@ -707,6 +880,8 @@ function AppShell({
         view={view}
         datasets={datasets}
         selectedDatasetId={selectedDatasetId}
+        activities={activities}
+        networkConnected={networkConnected}
         onNavigate={onNavigate}
         onSelectDataset={onSelectDataset}
         onCreateDataset={onCreateDataset}
@@ -737,6 +912,7 @@ function AppShell({
             onOpenDirectory={onOpenDirectory}
             onToggleSelection={onToggleSelection}
             onBackup={onBackup}
+            onRestore={onRestore}
           />
         )}
 
@@ -752,12 +928,11 @@ function AppShell({
             onOpenDirectory={onOpenDirectory}
             onToggleSelection={onToggleSelection}
             onBackup={onBackup}
+            onRestore={onRestore}
           />
         )}
 
         {view === "nodes" && <NodesView nodes={nodes} />}
-
-        {view === "settings" && <SettingsView />}
       </main>
     </div>
   );
@@ -767,6 +942,8 @@ type SidebarProps = {
   view: View;
   datasets: Dataset[];
   selectedDatasetId: string;
+  activities: Activity[];
+  networkConnected: boolean;
   onNavigate: (view: View) => void;
   onSelectDataset: (datasetId: string) => void;
   onCreateDataset: () => void;
@@ -776,6 +953,8 @@ function Sidebar({
   view,
   datasets,
   selectedDatasetId,
+  activities,
+  networkConnected,
   onNavigate,
   onSelectDataset,
   onCreateDataset,
@@ -842,20 +1021,59 @@ function Sidebar({
           </span>
           <span>Nodes</span>
         </button>
-
-        <button
-          className={`nav-item ${
-            view === "settings" ? "nav-item--active" : ""
-          }`}
-          type="button"
-          onClick={() => onNavigate("settings")}
-        >
-          <span className="nav-icon" aria-hidden="true">
-            ⚙
-          </span>
-          <span>Settings</span>
-        </button>
       </nav>
+
+      <div className="sidebar-connection">
+        <span
+          className={`status-dot ${
+            networkConnected ? "status-dot--online" : "status-dot--offline"
+          }`}
+        />
+        <span>{networkConnected ? "Connected" : "Disconnected"}</span>
+      </div>
+
+      <div className="sidebar-activity">
+        <div className="sidebar-divider" />
+
+        {activities.map((activity) => (
+          <div className="sidebar-activity-item" key={activity.id}>
+            <div className="sidebar-activity-title">
+              <span
+                className={
+                  activity.status === "running"
+                    ? "sidebar-activity-spinner"
+                    : activity.status === "success"
+                      ? "sidebar-activity-success"
+                      : "sidebar-activity-error"
+                }
+                aria-hidden="true"
+              >
+                {activity.status === "running"
+                  ? "↻"
+                  : activity.status === "success"
+                    ? "✓"
+                    : "×"}
+              </span>
+              <span>
+                {activity.status === "running"
+                  ? activity.kind === "backup"
+                    ? "Backing up"
+                    : "Restoring"
+                  : activity.status === "success"
+                    ? activity.kind === "backup"
+                      ? "Backup successful"
+                      : "Restore successful"
+                    : activity.kind === "backup"
+                      ? "Backup failed"
+                      : "Restore failed"}
+              </span>
+            </div>
+            <span className="sidebar-activity-dataset">
+              {activity.datasetName}
+            </span>
+          </div>
+        ))}
+      </div>
 
       <div className="sidebar-footer">
         <div className="identity-indicator">
@@ -907,7 +1125,7 @@ function DashboardView({
 
         <StatCard label="Last backup" value={dataset.lastBackup} />
 
-        <StatCard label="Health" value="Healthy" />
+        <StatCard label="Version" value={`v${dataset.generation}`} />
       </section>
 
       <section className="dashboard-section">
@@ -920,21 +1138,9 @@ function DashboardView({
 
         <div className="activity-list">
           <ActivityItem
-            title="Backup completed"
-            description="12,482 files protected"
-            time="Today, 09:42"
-          />
-
-          <ActivityItem
-            title="Catalog synchronized"
-            description="Network catalog updated"
-            time="Today, 09:41"
-          />
-
-          <ActivityItem
-            title="Storage health checked"
-            description="All required shards available"
-            time="Today, 09:40"
+            title="Last backup"
+            description={`${dataset.files.toLocaleString()} files protected`}
+            time={dataset.lastBackup}
           />
         </div>
       </section>
@@ -943,6 +1149,30 @@ function DashboardView({
 }
 
 function DatasetView({ dataset }: { dataset: Dataset }) {
+  const [entries, setEntries] = useState<FileEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+
+    getDatasetFiles(dataset.id)
+      .then((files) => {
+        if (!cancelled) setEntries(files);
+      })
+      .catch((error) => {
+        console.error("Failed to load dataset files:", error);
+        if (!cancelled) setEntries([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dataset.id]);
+
   return (
     <div className="page">
       <PageHeader
@@ -957,11 +1187,26 @@ function DatasetView({ dataset }: { dataset: Dataset }) {
           <span>Size</span>
         </div>
 
-        <FileTreeRow name="Documents" type="directory" />
-        <FileTreeRow name="Projects" type="directory" />
-        <FileTreeRow name="Pictures" type="directory" />
-        <FileTreeRow name="README.md" type="file" size="12 KB" />
-        <FileTreeRow name="notes.txt" type="file" size="4.8 KB" />
+        {loading ? (
+          <div className="empty-state">
+            <span className="empty-state-title">Loading files…</span>
+          </div>
+        ) : entries.length === 0 ? (
+          <div className="empty-state">
+            <span className="empty-state-title">No files in this dataset</span>
+          </div>
+        ) : (
+          entries.map((entry) => (
+            <FileTreeRow
+              key={entry.path}
+              name={entry.name}
+              type={entry.type}
+              size={
+                entry.type === "file" ? formatBytes(entry.size ?? 0) : undefined
+              }
+            />
+          ))
+        )}
       </div>
     </div>
   );
@@ -978,6 +1223,7 @@ function BrowseFilesView({
   onOpenDirectory,
   onToggleSelection,
   onBackup,
+  onRestore,
 }: {
   mode: BrowseMode;
   path: string;
@@ -989,6 +1235,7 @@ function BrowseFilesView({
   onOpenDirectory: (entry: BrowseEntry) => void;
   onToggleSelection: (entry: BrowseEntry) => void;
   onBackup: () => void;
+  onRestore: () => void;
 }) {
   const isLocal = mode === "local";
 
@@ -1122,7 +1369,7 @@ function BrowseFilesView({
           className="primary-button"
           type="button"
           disabled={selectedPaths.size === 0}
-          onClick={isLocal ? onBackup : undefined}
+          onClick={isLocal ? onBackup : onRestore}
         >
           {isLocal ? "Start Backup" : "Restore"}
         </button>
@@ -1148,10 +1395,6 @@ function NodesView({ nodes }: { nodes: Node[] }) {
             <span className="section-eyebrow">Bootstrap nodes</span>
             <h2>Configured entry points</h2>
           </div>
-
-          <button className="secondary-button" type="button">
-            Add node
-          </button>
         </div>
 
         <div className="node-list">
@@ -1216,67 +1459,6 @@ function NodeRow({ node }: { node: Node }) {
 
       <div className="node-latency">{node.latency}</div>
     </div>
-  );
-}
-
-function SettingsView() {
-  return (
-    <div className="page">
-      <PageHeader
-        eyebrow="Application"
-        title="Settings"
-        description="Manage identity, storage, network and security settings."
-      />
-
-      <div className="settings-list">
-        <SettingsRow
-          title="Identity"
-          description="Recovery identity and public key."
-        />
-
-        <SettingsRow
-          title="Storage"
-          description="Local node storage and cache configuration."
-        />
-
-        <SettingsRow
-          title="Network"
-          description="Peer discovery and connectivity."
-        />
-
-        <SettingsRow
-          title="Security"
-          description="Encryption and recovery settings."
-        />
-
-        <SettingsRow
-          title="About"
-          description="QuailFS version and project information."
-        />
-      </div>
-    </div>
-  );
-}
-
-function SettingsRow({
-  title,
-  description,
-}: {
-  title: string;
-  description: string;
-}) {
-  return (
-    <button className="settings-row" type="button">
-      <div>
-        <span className="settings-row-title">{title}</span>
-
-        <span className="settings-row-description">{description}</span>
-      </div>
-
-      <span className="settings-row-arrow" aria-hidden="true">
-        →
-      </span>
-    </button>
   );
 }
 

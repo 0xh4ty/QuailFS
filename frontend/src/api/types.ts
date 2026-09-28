@@ -1,10 +1,5 @@
 export type View =
-  | "dashboard"
-  | "dataset"
-  | "local-browse"
-  | "network-browse"
-  | "nodes"
-  | "settings";
+  "dashboard" | "dataset" | "local-browse" | "network-browse" | "nodes";
 
 export type Dataset = {
   id: string;
@@ -12,6 +7,7 @@ export type Dataset = {
   size: string;
   files: number;
   lastBackup: string;
+  generation: number;
 };
 
 export type NodeStatus = "Online" | "Offline" | "Expired";
