@@ -3,6 +3,7 @@ package network
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	cat "github.com/0xh4ty/quailfs/internal/catalog"
 	"github.com/0xh4ty/quailfs/internal/storage"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func RegisterHandlers(h host.Host, db *bbolt.DB) {
@@ -23,6 +25,10 @@ func RegisterHandlers(h host.Host, db *bbolt.DB) {
 
 	h.SetStreamHandler(PutCatalogProtocol, func(stream network.Stream) {
 		handlePutCatalog(stream, db)
+	})
+
+	h.SetStreamHandler(GetCatalogProtocol, func(stream network.Stream) {
+		handleGetCatalog(stream, db)
 	})
 }
 
@@ -229,4 +235,65 @@ func writeResponse(writer *bufio.Writer, success bool) error {
 	}
 
 	return writer.Flush()
+}
+
+func handleGetCatalog(stream network.Stream, db *bbolt.DB) {
+	defer stream.Close()
+	_ = stream.SetDeadline(time.Now().Add(60 * time.Second))
+
+	reader := bufio.NewReader(stream)
+	writer := bufio.NewWriter(stream)
+
+	keyHex, err := readString(reader)
+	if err != nil || len(keyHex) != 64 {
+		writeResponse(writer, false)
+		return
+	}
+	if _, err := hex.DecodeString(keyHex); err != nil {
+		writeResponse(writer, false)
+		return
+	}
+
+	var names []string
+	var blobs [][]byte
+
+	err = db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("catalogs"))
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, v []byte) error {
+			parts := strings.Split(string(k), ":")
+			if len(parts) >= 3 && parts[1] == keyHex {
+				names = append(names, string(k))
+				blobs = append(blobs, append([]byte(nil), v...))
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		writeResponse(writer, false)
+		return
+	}
+
+	if err := writer.WriteByte(1); err != nil {
+		return
+	}
+	if err := binary.Write(writer, binary.BigEndian, uint32(len(names))); err != nil {
+		return
+	}
+	for i := range names {
+		if err := writeString(writer, names[i]); err != nil {
+			return
+		}
+		if err := binary.Write(writer, binary.BigEndian, uint64(len(blobs[i]))); err != nil {
+			return
+		}
+		if _, err := writer.Write(blobs[i]); err != nil {
+			return
+		}
+	}
+	if err := writer.Flush(); err != nil {
+		log.Printf("GET_CATALOG: flush: %v", err)
+	}
 }
