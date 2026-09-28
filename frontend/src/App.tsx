@@ -259,7 +259,7 @@ function App() {
       [
         {
           id: activityId,
-          kind: "backup",
+          kind: "restore",
           datasetName: dataset.name,
           status: "running",
           time: "Now",
