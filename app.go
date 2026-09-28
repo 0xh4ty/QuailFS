@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -754,7 +755,36 @@ func (a *App) Backup(datasetID string, paths []string) error {
 		return errors.New("dataset not found")
 	}
 
-	zeroParentManifestID := make([]byte, 32)
+	var generation uint64 = 1
+	var parentManifestID []byte
+
+	for _, blob := range a.catalogObjects {
+		if blob.Type != 4 {
+			continue
+		}
+
+		manifest, err := backup.DeserializeManifestEnvelope(blob.Data)
+		if err != nil {
+			continue
+		}
+
+		if err := catalog.OpenManifestEnvelope(&manifest, dataset.CatalogKey); err != nil {
+			continue
+		}
+
+		if !bytes.Equal(manifest.ManifestPlain.DatasetID, dataset.DatasetID) {
+			continue
+		}
+
+		if manifest.ManifestPlain.Generation >= generation {
+			generation = manifest.ManifestPlain.Generation + 1
+			parentManifestID = append([]byte(nil), manifest.ManifestID...)
+		}
+	}
+
+	if parentManifestID == nil {
+		parentManifestID = make([]byte, 32)
+	}
 
 	return pipeline.Backup(
 		a.ctx,
@@ -764,8 +794,8 @@ func (a *App) Backup(datasetID string, paths []string) error {
 		dataset.DatasetKey,
 		dataset.CatalogKey,
 		dataset.Label,
-		1,
-		zeroParentManifestID,
+		generation,
+		parentManifestID,
 		a.x25519PublicKey,
 		a.ed25519PrivateKey,
 		a.ed25519PublicKey,
