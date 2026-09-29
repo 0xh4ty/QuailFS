@@ -13,7 +13,7 @@ func InitializeDatabase() (*bbolt.DB, error) {
 		return nil, err
 	}
 
-	file := filepath.Join(homeDir, ".node-data", "quailfs.db")
+	file := filepath.Join(homeDir, ".quailfs-data", "quailfs.db")
 
 	db, err := bbolt.Open(file, 0600, nil)
 	if err != nil {

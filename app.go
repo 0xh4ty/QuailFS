@@ -1253,7 +1253,7 @@ func (a *App) Restore(datasetID string, paths []string, destination string) (str
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
-	destDir := filepath.Join(homeDir, ".node-data", "restored")
+	destDir := filepath.Join(homeDir, ".quailfs-data", "restored")
 
 	written, err := pipeline.Restore(ctx, kad, dataset.DatasetID, dataset.DatasetKey, toRestore, chunkIndex, stripeIndex, destDir)
 	if err != nil {

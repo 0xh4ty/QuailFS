@@ -31,7 +31,7 @@ func RunNode(enableRelay bool) {
 		panic(err)
 	}
 
-	nodeDataDir := filepath.Join(homeDir, ".node-data")
+	nodeDataDir := filepath.Join(homeDir, ".quailfs-data")
 
 	err = os.MkdirAll(nodeDataDir, 0700)
 	if err != nil {

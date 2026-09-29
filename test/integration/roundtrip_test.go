@@ -29,7 +29,7 @@ func TestBackupRoundTrip(t *testing.T) {
 	// ------------- Backup --------------
 
 	homeDir, _ := os.UserHomeDir()
-	file := filepath.Join(homeDir, ".node-data", "test_file.txt")
+	file := filepath.Join(homeDir, ".quailfs-data", "test_file.txt")
 
 	data_first, _ := os.ReadFile(file)
 
@@ -111,7 +111,8 @@ func TestBackupRoundTripWithShardLoss(t *testing.T) {
 
 	// ------------- Backup --------------
 
-	file := "../../node-data/test_file.txt"
+	homeDir, _ := os.UserHomeDir()
+	file := filepath.Join(homeDir, ".quailfs-data", "test_file.txt")
 
 	data_first, _ := os.ReadFile(file)
 

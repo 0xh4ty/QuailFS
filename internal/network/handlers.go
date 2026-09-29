@@ -78,7 +78,7 @@ func handlePutShard(stream network.Stream, db *bbolt.DB) {
 		return
 	}
 
-	shardsDir := filepath.Join(homeDir, ".node-data", "shards")
+	shardsDir := filepath.Join(homeDir, ".quailfs-data", "shards")
 
 	if err := os.MkdirAll(shardsDir, 0700); err != nil {
 		writeResponse(writer, false)
