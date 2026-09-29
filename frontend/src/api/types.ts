@@ -4,7 +4,7 @@ export type View =
 export type Dataset = {
   id: string;
   name: string;
-  size: string;
+  size: number;
   files: number;
   lastBackup: string;
   generation: number;
@@ -51,4 +51,11 @@ export type BackupProgress = {
   progress: number;
   processedBytes: number;
   totalBytes: number;
+};
+
+export type BackupInfo = {
+  fileCount: number;
+  size: number;
+  lastBackup: string;
+  generation: number;
 };

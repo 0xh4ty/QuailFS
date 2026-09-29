@@ -67,7 +67,7 @@ type DatasetSession struct {
 type DatasetInfo struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
-	Size       string `json:"size"`
+	Size       int64  `json:"size"`
 	Files      int    `json:"files"`
 	LastBackup string `json:"lastBackup"`
 	Generation uint64 `json:"generation"`
@@ -85,6 +85,13 @@ type FileEntry struct {
 	Path string `json:"path"`
 	Type string `json:"type"`
 	Size int64  `json:"size,omitempty"`
+}
+
+type BackupInfo struct {
+	FileCount  int    `json:"fileCount"`
+	Size       int64  `json:"size"`
+	LastBackup string `json:"lastBackup"`
+	Generation uint64 `json:"generation"`
 }
 
 type restoreFileEntry struct {
@@ -726,7 +733,7 @@ func (a *App) CreateDataset(label string) (DatasetInfo, error) {
 	return DatasetInfo{
 		ID:         hex.EncodeToString(datasetID),
 		Name:       label,
-		Size:       "0 B",
+		Size:       0,
 		Files:      0,
 		LastBackup: "Never",
 	}, nil
@@ -804,7 +811,7 @@ func (a *App) ListDatasets() ([]DatasetInfo, error) {
 		result = append(result, DatasetInfo{
 			ID:         hex.EncodeToString(dataset.DatasetID),
 			Name:       dataset.Label,
-			Size:       formatBytes(totalSize),
+			Size:       totalSize,
 			Files:      len(files),
 			LastBackup: lastBackup,
 			Generation: generation,
@@ -1070,27 +1077,6 @@ func isZeroBytes(data []byte) bool {
 	return true
 }
 
-func formatBytes(size int64) string {
-	if size <= 0 {
-		return "0 B"
-	}
-
-	units := []string{"B", "KB", "MB", "GB", "TB"}
-	value := float64(size)
-	unit := 0
-	for value >= 1024 && unit < len(units)-1 {
-		value /= 1024
-		unit++
-	}
-	if unit == 0 {
-		return fmt.Sprintf("%d B", size)
-	}
-	if value >= 10 {
-		return fmt.Sprintf("%.0f %s", value, units[unit])
-	}
-	return fmt.Sprintf("%.1f %s", value, units[unit])
-}
-
 func (a *App) ListNodes() ([]NodeInfo, error) {
 	a.mu.RLock()
 	if !a.unlocked {
@@ -1147,20 +1133,21 @@ func (a *App) ListNodes() ([]NodeInfo, error) {
 	return result, nil
 }
 
-func (a *App) Backup(datasetID string, paths []string) error {
+func (a *App) Backup(datasetID string, paths []string) (BackupInfo, error) {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
 
 	if !a.unlocked {
-		return errors.New("user is not unlocked")
+		a.mu.RUnlock()
+		return BackupInfo{}, errors.New("user is not unlocked")
 	}
 
 	dataset, ok := a.datasets[datasetID]
 	if !ok {
-		return errors.New("dataset not found")
+		a.mu.RUnlock()
+		return BackupInfo{}, errors.New("dataset not found")
 	}
 
-	var generation uint64 = 1
+	generation := uint64(1)
 	var parentManifestID []byte
 
 	for _, blob := range a.catalogObjects {
@@ -1191,21 +1178,56 @@ func (a *App) Backup(datasetID string, paths []string) error {
 		parentManifestID = make([]byte, 32)
 	}
 
-	return pipeline.Backup(
-		a.ctx,
+	ctx := a.ctx
+	userID := append([]byte(nil), a.userID...)
+	datasetIDBytes := append([]byte(nil), dataset.DatasetID...)
+	datasetKey := append([]byte(nil), dataset.DatasetKey...)
+	catalogKey := append([]byte(nil), dataset.CatalogKey...)
+	label := dataset.Label
+	x25519PublicKey := append([]byte(nil), a.x25519PublicKey...)
+	ed25519PrivateKey := a.ed25519PrivateKey
+	ed25519PublicKey := append([]byte(nil), a.ed25519PublicKey...)
+	kad := a.kad
+
+	a.mu.RUnlock()
+
+	result, err := pipeline.Backup(
+		ctx,
 		paths,
-		a.userID,
-		dataset.DatasetID,
-		dataset.DatasetKey,
-		dataset.CatalogKey,
-		dataset.Label,
+		userID,
+		datasetIDBytes,
+		datasetKey,
+		catalogKey,
+		label,
 		generation,
 		parentManifestID,
-		a.x25519PublicKey,
-		a.ed25519PrivateKey,
-		a.ed25519PublicKey,
-		a.kad,
+		x25519PublicKey,
+		ed25519PrivateKey,
+		ed25519PublicKey,
+		kad,
 	)
+	if err != nil {
+		return BackupInfo{}, err
+	}
+
+	var fileCount int
+
+	for _, tree := range result.Manifest.ManifestPlain.Trees {
+		fileCount += len(tree.Files)
+	}
+
+	var totalSize int64
+
+	for _, chunk := range result.Manifest.ManifestPlain.MChunks {
+		totalSize += int64(chunk.Size)
+	}
+
+	return BackupInfo{
+		FileCount:  fileCount,
+		Size:       totalSize,
+		LastBackup: formatLastBackup(result.Head.Body.CreatedAt),
+		Generation: result.Head.Body.Generation,
+	}, nil
 }
 
 func (a *App) Restore(datasetID string, paths []string, destination string) (string, error) {

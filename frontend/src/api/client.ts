@@ -1,4 +1,5 @@
 import type {
+  BackupInfo,
   BackupProgress,
   Dataset,
   FileEntry,
@@ -74,8 +75,8 @@ export async function createDataset(label: string): Promise<Dataset> {
 export async function backup(
   datasetId: string,
   paths: string[],
-): Promise<void> {
-  await Backup(datasetId, paths);
+): Promise<BackupInfo> {
+  return Backup(datasetId, paths);
 }
 
 export async function restore(

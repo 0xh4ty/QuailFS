@@ -209,7 +209,21 @@ function App() {
     setView("dashboard");
 
     try {
-      await backup(selectedDatasetId, paths);
+      const backupInfo = await backup(selectedDatasetId, paths);
+
+      setDatasets((currentDatasets) =>
+        currentDatasets.map((dataset) =>
+          dataset.id === selectedDatasetId
+            ? {
+                ...dataset,
+                files: dataset.files + backupInfo.fileCount,
+                size: dataset.size + backupInfo.size,
+                lastBackup: backupInfo.lastBackup,
+                generation: backupInfo.generation,
+              }
+            : dataset,
+        ),
+      );
 
       const completedAt = new Date().toLocaleTimeString([], {
         hour: "2-digit",
@@ -1004,7 +1018,9 @@ function Sidebar({
             >
               <span className="dataset-item-name">{dataset.name}</span>
 
-              <span className="dataset-item-meta">{dataset.size}</span>
+              <span className="dataset-item-meta">
+                {formatBytes(dataset.size)}
+              </span>
             </button>
           ))}
         </div>
@@ -1121,7 +1137,7 @@ function DashboardView({
       <section className="stats-grid">
         <StatCard label="Files" value={dataset.files.toLocaleString()} />
 
-        <StatCard label="Data" value={dataset.size} />
+        <StatCard label="Data" value={formatBytes(dataset.size)} />
 
         <StatCard label="Last backup" value={dataset.lastBackup} />
 

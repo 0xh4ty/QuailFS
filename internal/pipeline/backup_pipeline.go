@@ -149,7 +149,7 @@ func randomCatalogSuffix() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte, datasetKey []byte, catalogKey []byte, label string, generation uint64, parentManifestID []byte, userX25519Pubkey []byte, ed25519PrivateKey []byte, ed25519PublicKey []byte, kad *dht.IpfsDHT) error {
+func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte, datasetKey []byte, catalogKey []byte, label string, generation uint64, parentManifestID []byte, userX25519Pubkey []byte, ed25519PrivateKey []byte, ed25519PublicKey []byte, kad *dht.IpfsDHT) (BackupResult, error) {
 	log.Printf("Backup started")
 	log.Printf("Backup: %d path(s)", len(paths))
 
@@ -166,7 +166,7 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 		info, err := os.Stat(rootPath)
 		if err != nil {
 			log.Printf("Backup: stat failed for %q: %v", rootPath, err)
-			return fmt.Errorf("stat %q: %w", rootPath, err)
+			return BackupResult{}, fmt.Errorf("stat %q: %w", rootPath, err)
 		}
 
 		tree := types.Tree{
@@ -204,9 +204,10 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 
 				return nil
 			})
+
 			if err != nil {
 				log.Printf("Backup: directory backup failed for %q: %v", rootPath, err)
-				return fmt.Errorf("backup directory %q: %w", rootPath, err)
+				return BackupResult{}, fmt.Errorf("backup directory %q: %w", rootPath, err)
 			}
 		} else {
 			log.Printf("Backup: processing file %q", rootPath)
@@ -214,7 +215,7 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 			file, chunks, stripes, shards, err := backupFile(rootPath, datasetID, datasetKey)
 			if err != nil {
 				log.Printf("Backup: backupFile failed for %q: %v", rootPath, err)
-				return err
+				return BackupResult{}, err
 			}
 
 			log.Printf("Backup: file produced %d chunk(s), %d stripe(s), %d shard set(s)", len(chunks), len(stripes), len(shards.shards))
@@ -244,7 +245,7 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 	)
 	if err != nil {
 		log.Printf("Backup: create manifest failed: %v", err)
-		return fmt.Errorf("create manifest: %w", err)
+		return BackupResult{}, fmt.Errorf("create manifest: %w", err)
 	}
 
 	log.Printf("Backup: manifest created: %x", manifest.ManifestID)
@@ -260,7 +261,7 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 	)
 	if err != nil {
 		log.Printf("Backup: create wrapped dataset failed: %v", err)
-		return fmt.Errorf("create wrapped dataset: %w", err)
+		return BackupResult{}, fmt.Errorf("create wrapped dataset: %w", err)
 	}
 
 	head := catalog.CreateHead(
@@ -288,7 +289,7 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 
 	if kad == nil {
 		log.Printf("Backup: DHT is nil")
-		return fmt.Errorf("DHT is not initialized")
+		return BackupResult{}, fmt.Errorf("DHT is not initialized")
 	}
 
 	h := kad.Host()
@@ -309,7 +310,7 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 	log.Printf("Backup: discovered %d peer(s)", len(livePeers))
 
 	if len(livePeers) == 0 {
-		return fmt.Errorf("no peers discovered through DHT")
+		return BackupResult{}, fmt.Errorf("no peers discovered through DHT")
 	}
 
 	var objectNames []string
@@ -347,14 +348,14 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 
 			if shard == nil {
 				log.Printf("Backup: shard %q not found in shard collection", shardName)
-				return fmt.Errorf("shard %q not found", shardName)
+				return BackupResult{}, fmt.Errorf("shard %q not found", shardName)
 			}
 
 			log.Printf("Backup: sending shard %s to peer %s (%d bytes)", shardName, peerID, len(shard))
 
 			if err := network.PutShard(ctx, h, peerID, shardName, shard); err != nil {
 				log.Printf("Backup: PUT_SHARD failed for %s -> %s: %v", shardName, peerID, err)
-				return fmt.Errorf("put shard %q to peer %s: %w", shardName, peerID, err)
+				return BackupResult{}, fmt.Errorf("put shard %q to peer %s: %w", shardName, peerID, err)
 			}
 
 			log.Printf("Backup: shard %s sent successfully to peer %s", shardName, peerID)
@@ -369,19 +370,19 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 	userIndexSuffix, err := randomCatalogSuffix()
 	if err != nil {
 		log.Printf("Backup: generate user index suffix failed: %v", err)
-		return fmt.Errorf("generate user index suffix: %w", err)
+		return BackupResult{}, fmt.Errorf("generate user index suffix: %w", err)
 	}
 
 	headSuffix, err := randomCatalogSuffix()
 	if err != nil {
 		log.Printf("Backup: generate head suffix failed: %v", err)
-		return fmt.Errorf("generate head suffix: %w", err)
+		return BackupResult{}, fmt.Errorf("generate head suffix: %w", err)
 	}
 
 	manifestSuffix, err := randomCatalogSuffix()
 	if err != nil {
 		log.Printf("Backup: generate manifest suffix failed: %v", err)
-		return fmt.Errorf("generate manifest suffix: %w", err)
+		return BackupResult{}, fmt.Errorf("generate manifest suffix: %w", err)
 	}
 
 	userIndexData := backup.SerializeUserIndex(userIndex)
@@ -441,14 +442,14 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 
 			if object == nil {
 				log.Printf("Backup: catalog object %q not found", objectName)
-				return fmt.Errorf("catalog object %q not found", objectName)
+				return BackupResult{}, fmt.Errorf("catalog object %q not found", objectName)
 			}
 
 			log.Printf("Backup: sending catalog %s to peer %s", object.name, peerID)
 
 			if err := network.PutCatalog(ctx, h, peerID, object.name, object.objectType, object.data, ed25519PublicKey); err != nil {
 				log.Printf("Backup: PUT_CATALOG failed for %s -> %s: %v", object.name, peerID, err)
-				return fmt.Errorf("put catalog %q to peer %s: %w", object.name, peerID, err)
+				return BackupResult{}, fmt.Errorf("put catalog %q to peer %s: %w", object.name, peerID, err)
 			}
 
 			log.Printf("Backup: catalog %s sent successfully to peer %s", object.name, peerID)
@@ -457,5 +458,12 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 
 	log.Printf("Backup completed successfully")
 
-	return nil
+	return BackupResult{
+		Manifest:        manifest,
+		Head:            head,
+		WrappedDataset:  wrappedDataset,
+		UserIndex:       userIndex,
+		StripeIDs:       stripeIDs,
+		ShardCollection: shardCollection,
+	}, nil
 }
