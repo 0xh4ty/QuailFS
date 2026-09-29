@@ -237,9 +237,6 @@ function App() {
             : activity,
         ),
       );
-
-      const refreshed = await listDatasets();
-      setDatasets(refreshed);
     } catch (error) {
       console.error("Backup failed:", error);
 
