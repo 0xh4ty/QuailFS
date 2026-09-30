@@ -166,6 +166,15 @@ function App() {
       });
   }, [stage]);
 
+  const handleRefreshNodes = async () => {
+    try {
+      const fetchedNodes = await listNodes();
+      setNodes(fetchedNodes);
+    } catch (error) {
+      console.error("Failed to refresh network nodes:", error);
+    }
+  };
+
   const handleSelectDataset = (datasetId: string) => {
     setSelectedDatasetId(datasetId);
     setView("dashboard");
@@ -523,6 +532,7 @@ function App() {
         activities={activities}
         networkConnected={networkConnected}
         onRestore={handleRestore}
+        onRefreshNodes={handleRefreshNodes}
       />
 
       {creatingDataset && (
@@ -858,6 +868,7 @@ type AppShellProps = {
   onToggleSelection: (entry: BrowseEntry) => void;
   onBackup: () => void;
   onRestore: () => void;
+  onRefreshNodes: () => void;
 };
 
 function AppShell({
@@ -884,6 +895,7 @@ function AppShell({
   onToggleSelection,
   onBackup,
   onRestore,
+  onRefreshNodes,
 }: AppShellProps) {
   return (
     <div className="app-shell">
@@ -943,7 +955,9 @@ function AppShell({
           />
         )}
 
-        {view === "nodes" && <NodesView nodes={nodes} />}
+        {view === "nodes" && (
+          <NodesView nodes={nodes} onRefresh={onRefreshNodes} />
+        )}
       </main>
     </div>
   );
@@ -1391,7 +1405,13 @@ function BrowseFilesView({
   );
 }
 
-function NodesView({ nodes }: { nodes: Node[] }) {
+function NodesView({
+  nodes,
+  onRefresh,
+}: {
+  nodes: Node[];
+  onRefresh: () => void;
+}) {
   const onlineCount = nodes.filter((node) => node.status === "Online").length;
 
   return (
@@ -1428,6 +1448,14 @@ function NodesView({ nodes }: { nodes: Node[] }) {
               <span className="section-count">{onlineCount} online</span>
             </h2>
           </div>
+
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => void onRefresh()}
+          >
+            Refresh
+          </button>
         </div>
 
         <div className="node-list">
