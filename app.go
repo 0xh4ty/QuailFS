@@ -48,6 +48,9 @@ type App struct {
 	kad            *dht.IpfsDHT
 
 	catalogObjects []network.CatalogBlob
+
+	backupLocks   map[string]*sync.Mutex
+	backupLocksMu sync.Mutex
 }
 
 type UserInfo struct {
@@ -56,12 +59,14 @@ type UserInfo struct {
 }
 
 type DatasetSession struct {
-	DatasetID  []byte
-	DatasetKey []byte
-	CatalogKey []byte
-	DataKey    []byte
-	NameKey    []byte
-	Label      string
+	DatasetID        []byte
+	DatasetKey       []byte
+	CatalogKey       []byte
+	DataKey          []byte
+	NameKey          []byte
+	Label            string
+	Generation       uint64
+	ParentManifestID []byte
 }
 
 type DatasetInfo struct {
@@ -100,7 +105,8 @@ type restoreFileEntry struct {
 
 func NewApp() *App {
 	return &App{
-		datasets: make(map[string]DatasetSession),
+		datasets:    make(map[string]DatasetSession),
+		backupLocks: make(map[string]*sync.Mutex),
 	}
 }
 
@@ -523,12 +529,14 @@ func (a *App) fetchCatalogObjects(ctx context.Context, kad *dht.IpfsDHT) {
 
 			a.mu.Lock()
 			a.datasets[hex.EncodeToString(datasetID)] = DatasetSession{
-				DatasetID:  append([]byte(nil), datasetID...),
-				DatasetKey: append([]byte(nil), datasetKey...),
-				CatalogKey: append([]byte(nil), catalogKey...),
-				DataKey:    append([]byte(nil), dataKey...),
-				NameKey:    append([]byte(nil), nameKey...),
-				Label:      wrappedDataset.Body.Label,
+				DatasetID:        append([]byte(nil), datasetID...),
+				DatasetKey:       append([]byte(nil), datasetKey...),
+				CatalogKey:       append([]byte(nil), catalogKey...),
+				DataKey:          append([]byte(nil), dataKey...),
+				NameKey:          append([]byte(nil), nameKey...),
+				Label:            wrappedDataset.Body.Label,
+				Generation:       head.Body.Generation,
+				ParentManifestID: append([]byte(nil), head.Body.ManifestID...),
 			}
 			a.mu.Unlock()
 
@@ -722,12 +730,14 @@ func (a *App) CreateDataset(label string) (DatasetInfo, error) {
 	}
 
 	a.datasets[hex.EncodeToString(datasetID)] = DatasetSession{
-		DatasetID:  datasetID,
-		DatasetKey: datasetKey,
-		CatalogKey: catalogKey,
-		DataKey:    dataKey,
-		NameKey:    nameKey,
-		Label:      label,
+		DatasetID:        datasetID,
+		DatasetKey:       datasetKey,
+		CatalogKey:       catalogKey,
+		DataKey:          dataKey,
+		NameKey:          nameKey,
+		Label:            label,
+		Generation:       0,
+		ParentManifestID: make([]byte, 32),
 	}
 
 	return DatasetInfo{
@@ -1134,6 +1144,10 @@ func (a *App) ListNodes() ([]NodeInfo, error) {
 }
 
 func (a *App) Backup(datasetID string, paths []string) (BackupInfo, error) {
+	lock := a.datasetBackupLock(datasetID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	a.mu.RLock()
 
 	if !a.unlocked {
@@ -1147,34 +1161,10 @@ func (a *App) Backup(datasetID string, paths []string) (BackupInfo, error) {
 		return BackupInfo{}, errors.New("dataset not found")
 	}
 
-	generation := uint64(1)
-	var parentManifestID []byte
+	generation := dataset.Generation + 1
+	parentManifestID := append([]byte(nil), dataset.ParentManifestID...)
 
-	for _, blob := range a.catalogObjects {
-		if blob.Type != 4 {
-			continue
-		}
-
-		manifest, err := backup.DeserializeManifestEnvelope(blob.Data)
-		if err != nil {
-			continue
-		}
-
-		if err := catalog.OpenManifestEnvelope(&manifest, dataset.CatalogKey); err != nil {
-			continue
-		}
-
-		if !bytes.Equal(manifest.ManifestPlain.DatasetID, dataset.DatasetID) {
-			continue
-		}
-
-		if manifest.ManifestPlain.Generation >= generation {
-			generation = manifest.ManifestPlain.Generation + 1
-			parentManifestID = append([]byte(nil), manifest.ManifestID...)
-		}
-	}
-
-	if parentManifestID == nil {
+	if len(parentManifestID) == 0 {
 		parentManifestID = make([]byte, 32)
 	}
 
@@ -1190,6 +1180,13 @@ func (a *App) Backup(datasetID string, paths []string) (BackupInfo, error) {
 	kad := a.kad
 
 	a.mu.RUnlock()
+
+	fmt.Printf(
+		"[Backup] starting: dataset=%s generation=%d parent=%x\n",
+		datasetID,
+		generation,
+		parentManifestID,
+	)
 
 	result, err := pipeline.Backup(
 		ctx,
@@ -1210,6 +1207,31 @@ func (a *App) Backup(datasetID string, paths []string) (BackupInfo, error) {
 		return BackupInfo{}, err
 	}
 
+	a.mu.Lock()
+
+	dataset, ok = a.datasets[datasetID]
+	if !ok {
+		a.mu.Unlock()
+		return BackupInfo{}, errors.New("dataset disappeared during backup")
+	}
+
+	dataset.Generation = result.Manifest.ManifestPlain.Generation
+	dataset.ParentManifestID = append(
+		[]byte(nil),
+		result.Manifest.ManifestID...,
+	)
+
+	a.datasets[datasetID] = dataset
+
+	a.mu.Unlock()
+
+	fmt.Printf(
+		"[Backup] completed: generation=%d manifest=%x parent=%x\n",
+		dataset.Generation,
+		result.Manifest.ManifestID,
+		result.Manifest.ManifestPlain.ParentManifestID,
+	)
+
 	var fileCount int
 
 	for _, tree := range result.Manifest.ManifestPlain.Trees {
@@ -1228,6 +1250,18 @@ func (a *App) Backup(datasetID string, paths []string) (BackupInfo, error) {
 		LastBackup: formatLastBackup(result.Head.Body.CreatedAt),
 		Generation: result.Head.Body.Generation,
 	}, nil
+}
+
+func (a *App) datasetBackupLock(datasetID string) *sync.Mutex {
+	a.backupLocksMu.Lock()
+	defer a.backupLocksMu.Unlock()
+
+	lock, ok := a.backupLocks[datasetID]
+	if !ok {
+		lock = &sync.Mutex{}
+		a.backupLocks[datasetID] = lock
+	}
+	return lock
 }
 
 func (a *App) Restore(datasetID string, paths []string, destination string) (string, error) {
