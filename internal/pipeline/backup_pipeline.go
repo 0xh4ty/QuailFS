@@ -296,21 +296,25 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 
 	log.Printf("Backup: local PeerID: %s", h.ID())
 
-	livePeers := make([]peer.ID, 0)
+	storageNodes := make([]peer.ID, 0)
 
 	for _, p := range kad.RoutingTable().ListPeers() {
 		if p == h.ID() {
 			continue
 		}
 
-		log.Printf("Backup: discovered peer: %s", p)
-		livePeers = append(livePeers, p)
+		if p.String()[0] != 'Q' {
+			continue
+		}
+
+		log.Printf("Backup: discovered storage node: %s", p)
+		storageNodes = append(storageNodes, p)
 	}
 
-	log.Printf("Backup: discovered %d peer(s)", len(livePeers))
+	log.Printf("Backup: discovered %d storage node(s)", len(storageNodes))
 
-	if len(livePeers) == 0 {
-		return BackupResult{}, fmt.Errorf("no peers discovered through DHT")
+	if len(storageNodes) == 0 {
+		return BackupResult{}, fmt.Errorf("no storage nodes discovered through DHT")
 	}
 
 	var objectNames []string
@@ -323,7 +327,7 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 
 	log.Printf("Backup: %d shard object(s) to place", len(objectNames))
 
-	placements := place.Place(livePeers, objectNames)
+	placements := place.Place(storageNodes, objectNames)
 
 	for peerID, shardNames := range placements {
 		log.Printf("Backup: peer %s assigned %d shard(s)", peerID, len(shardNames))
@@ -425,7 +429,7 @@ func Backup(ctx context.Context, paths []string, userID []byte, datasetID []byte
 		catalogNames = append(catalogNames, object.name)
 	}
 
-	catalogPlacements := place.Place(livePeers, catalogNames)
+	catalogPlacements := place.Place(storageNodes, catalogNames)
 
 	for peerID, objectNames := range catalogPlacements {
 		log.Printf("Backup: peer %s assigned %d catalog object(s)", peerID, len(objectNames))
